@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>orvex.sh</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      max-width: 56rem; margin: 4rem auto; padding: 0 1.5rem;
+      line-height: 1.55;
+    }
+    h1 { font-size: 2rem; margin: 0 0 1.5rem; }
+    h2 { margin-top: 2.5rem; font-size: 1.1rem; }
+    code, pre { background: rgba(127,127,127,0.12); padding: 0.1em 0.35em; border-radius: 4px; }
+    pre { padding: 1rem; overflow-x: auto; }
+    a { color: inherit; }
+    .muted { color: rgba(127,127,127,0.9); font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>orvex.sh</h1>
+  <p class="muted">Install endpoints for orvex AI tooling. Each script is a single bash file you can <code>curl … | bash</code> or download + inspect first.</p>
+
+  <h2>BMAD modules (Linear + Docmost)</h2>
+  <pre><code>curl -fsSL orvex.sh/install/bmad | bash</code></pre>
+  <p class="muted">Installs <a href="https://github.com/orvexai/bmad-modules"><code>orvexai/bmad-modules</code></a> into the current project, applies the Linear write-suppression patch, and stages override TOMLs. Requires Node ≥ 20.12 and SSH access to the orvexai GitHub org.</p>
+
+  <h2>Source</h2>
+  <p><a href="https://github.com/orvex-sh/orvex-sh.github.io">orvex-sh/orvex-sh.github.io</a></p>
+</body>
+</html>

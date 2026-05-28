@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# orvex.sh/install/bmad — install orvex BMAD 6.8 modules (bmad-linear + bmad-docmost) into the current project.
+#
+# Usage:
+#   curl -fsSL orvex.sh/install/bmad | bash
+#
+# Or download + inspect first:
+#   curl -fsSL orvex.sh/install/bmad -o /tmp/install-bmad && bash /tmp/install-bmad
+#
+# Optional environment overrides:
+#   ORVEX_BMAD_REPO     git URL to clone (default: git@github.com:orvexai/bmad-modules)
+#   ORVEX_BMAD_DIR      target project dir (default: current working dir)
+#
+# What it does:
+#   1. npx bmad-method install --modules bmm --custom-source <repo> --tools claude-code --yes
+#   2. _bmad/lnr/bin/apply-patch.sh   (Linear write-suppression patch — idempotent)
+#   3. cp _bmad/{lnr,doc}/overrides/*.toml _bmad/custom/
+#
+# Prerequisites:
+#   - node ≥ 20.12 + npx (ships with npm 7+)
+#   - git
+#   - SSH access to git@github.com:orvexai/bmad-modules (orvexai org membership) OR set
+#     ORVEX_BMAD_REPO=https://github.com/orvexai/bmad-modules and have a token in your git config.
+
+set -euo pipefail
+
+REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
+TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+  C_CYAN="$(tput setaf 6)"; C_GREEN="$(tput setaf 2)"; C_YELLOW="$(tput setaf 3)"
+  C_RED="$(tput setaf 1)"; C_BOLD="$(tput bold)"; C_RESET="$(tput sgr0)"
+else
+  C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_BOLD=""; C_RESET=""
+fi
+step() { printf "\n%s▶ %s%s\n" "$C_CYAN" "$*" "$C_RESET"; }
+ok()   { printf "  %s✓%s %s\n" "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf "  %s⚠%s %s\n" "$C_YELLOW" "$C_RESET" "$*"; }
+fail() { printf "%sERROR:%s %s\n" "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+cat <<BANNER
+${C_BOLD}orvex bmad installer${C_RESET}  •  bmad-linear (lnr) + bmad-docmost (doc)
+source: $REPO
+target: $TARGET_DIR
+BANNER
+
+# ── Pre-flight ────────────────────────────────────────────────────────────────
+step "Pre-flight checks"
+
+command -v node >/dev/null 2>&1 || fail "node not found. Install Node.js v20.12+ from https://nodejs.org"
+command -v npx  >/dev/null 2>&1 || fail "npx not found (ships with npm 7+). Update node/npm."
+command -v git  >/dev/null 2>&1 || fail "git not found"
+
+NODE_VER="$(node --version | sed 's/^v//')"
+NODE_MAJOR="$(printf "%s" "$NODE_VER" | cut -d. -f1)"
+NODE_MINOR="$(printf "%s" "$NODE_VER" | cut -d. -f2)"
+if [ "$NODE_MAJOR" -lt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 12 ]; }; then
+  fail "node v$NODE_VER is too old (need v20.12+)"
+fi
+ok "node v$NODE_VER"
+ok "npx + git present"
+
+[ -d "$TARGET_DIR" ] || fail "target dir does not exist: $TARGET_DIR"
+cd "$TARGET_DIR"
+
+if [ -d "_bmad" ]; then
+  warn "_bmad/ already exists — running as an update (npx bmad-method will Quick Update existing modules)"
+fi
+
+# ── Install ───────────────────────────────────────────────────────────────────
+step "1/3 — npx bmad-method install ..."
+npx --yes bmad-method install \
+  --directory . \
+  --modules bmm \
+  --custom-source "$REPO" \
+  --tools claude-code \
+  --yes
+ok "core + bmm + lnr + doc installed under $TARGET_DIR/_bmad/"
+
+# ── Patch ─────────────────────────────────────────────────────────────────────
+step "2/3 — Linear write-suppression patch"
+if [ -x "_bmad/lnr/bin/apply-patch.sh" ]; then
+  _bmad/lnr/bin/apply-patch.sh
+  ok "patch applied (re-run after every upstream Quick Update)"
+elif [ -f "_bmad/lnr/bin/apply-patch.sh" ]; then
+  bash _bmad/lnr/bin/apply-patch.sh
+  ok "patch applied (re-run after every upstream Quick Update)"
+else
+  fail "_bmad/lnr/bin/apply-patch.sh not found — bmad-linear install incomplete?"
+fi
+
+# ── Overrides ─────────────────────────────────────────────────────────────────
+step "3/3 — stage per-project overrides → _bmad/custom/"
+mkdir -p _bmad/custom
+cp _bmad/lnr/overrides/*.toml _bmad/custom/
+cp _bmad/doc/overrides/*.toml _bmad/custom/
+OVERRIDE_COUNT=$(ls _bmad/custom/*.toml 2>/dev/null | wc -l | tr -d ' ')
+ok "$OVERRIDE_COUNT override TOMLs copied to _bmad/custom/"
+
+# ── Next steps ────────────────────────────────────────────────────────────────
+cat <<NEXT
+
+${C_GREEN}${C_BOLD}✓ Orvex BMAD modules installed.${C_RESET}
+
+${C_BOLD}Next steps:${C_RESET}
+  1. Edit ${C_BOLD}$TARGET_DIR/_bmad/custom/*.toml${C_RESET} to fill in your project values:
+       • lnr overrides: linear_tenant, linear_project, team_key
+       • doc overrides: docmost_url, docmost_space, docmost_default_owner_id
+  2. Commit:
+       git add _bmad/custom
+       git commit -m "chore(bmad): orvex modules + project overrides"
+  3. After future upstream BMAD Quick Updates, re-run the patch:
+       _bmad/lnr/bin/apply-patch.sh
+
+${C_BOLD}Docs:${C_RESET} https://github.com/orvexai/bmad-modules
+
+NEXT
