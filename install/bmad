@@ -30,11 +30,11 @@
 set -euo pipefail
 
 # ── Reattach stdin to the controlling tty ─────────────────────────────────────
-# When the script is run via `curl … | bash`, our stdin IS the script body —
-# any interactive child process (npx prompts) would otherwise read the rest of
-# the script as its "answers". Reopen stdin from the user's terminal so prompts
-# work. If we're already on a tty (saved + run manually) this is a no-op.
-if [ ! -t 0 ] && [ -e /dev/tty ]; then
+# When run via `curl … | bash`, stdin IS the script body. Reopen it from the
+# user's terminal so npx's interactive prompts work. /dev/tty may exist in the
+# filesystem but be unopenable (containers, CI with no tty, etc.) — probe in a
+# subshell first so a failed exec under `set -e` doesn't silently kill us.
+if [ ! -t 0 ] && [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; then
   exec </dev/tty
 fi
 
