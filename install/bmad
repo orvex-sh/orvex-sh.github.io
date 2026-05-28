@@ -34,10 +34,6 @@ fi
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
 TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
 
-# bmm is always installed (orvex modules require it); ORVEX_BMAD_MODULES layers on more.
-EXTRA_MODULES="${ORVEX_BMAD_MODULES:-}"
-MODULES="bmm${EXTRA_MODULES:+,$EXTRA_MODULES}"
-
 # Layer additional --custom-source URLs onto the orvex repo.
 EXTRA_SOURCES="${ORVEX_BMAD_EXTRA_SOURCES:-}"
 SOURCES="$REPO${EXTRA_SOURCES:+,$EXTRA_SOURCES}"
@@ -61,7 +57,31 @@ command -v git >/dev/null 2>&1 || fail "git not found"
 [ -d "$TARGET_DIR" ] || fail "target dir not found: $TARGET_DIR"
 cd "$TARGET_DIR"
 
-printf "\n${B}orvex bmad installer${R}  ${D}→ %s${R}\n\n" "$(pwd)"
+printf "\n${B}orvex bmad installer${R}  ${D}→ %s${R}\n" "$(pwd)"
+
+# ── Module selector ──────────────────────────────────────────────────────────
+# Always installed (non-toggleable): bmm (required by orvex), bmad-linear, bmad-docmost.
+# Set ORVEX_BMAD_MODULES env var to skip the prompt (CI / scripted installs).
+# Registry mirrored from https://github.com/bmad-code-org/BMAD-METHOD/blob/main/bmad-modules.yaml
+if [ -n "${ORVEX_BMAD_MODULES:-}" ]; then
+  EXTRA_MODULES="$ORVEX_BMAD_MODULES"
+else
+  printf "\n  ${D}always installed:${R} ${B}bmm${R} ${D}(required)${R}, ${B}bmad-linear${R}, ${B}bmad-docmost${R} ${D}(orvex)${R}\n"
+  printf "\n  ${B}Optional official BMAD modules:${R}\n"
+  printf "    ${B}tea${R}        BMad Test Architect — quality strategy + release gates\n"
+  printf "    ${B}bmb${R}        BMad Builder — author agents, workflows, modules\n"
+  printf "    ${B}cis${R}        Creative Intelligence Suite — brainstorming, design thinking\n"
+  printf "    ${B}gds${R}        Game Dev Studio — Unity, Unreal, Godot, Phaser\n"
+  printf "    ${B}wds${R}        Whiteport Design Studio — UX-first planning\n"
+  printf "\n  ${B}Codes to add${R} ${D}(comma-separated, blank for none):${R} "
+  read -r EXTRA_MODULES
+fi
+
+# Build the final --modules list. bmm always first. Strip whitespace + dedupe bmm.
+EXTRA_MODULES="$(printf '%s' "${EXTRA_MODULES:-}" | tr -d ' ' | sed -E 's/(^|,)bmm($|,)/\1\2/g; s/,+/,/g; s/^,//; s/,$//')"
+MODULES="bmm${EXTRA_MODULES:+,$EXTRA_MODULES}"
+printf "  ${D}installing:${R} ${B}%s${R} ${D}+ orvex modules from %s${R}\n" "$MODULES" "$REPO"
+echo
 
 # ── Install — interactive, only orvex modules + bmm dep are preselected ──────
 # Filter known-cosmetic post-install warnings on stderr so they don't clutter.
