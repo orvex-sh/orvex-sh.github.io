@@ -29,13 +29,19 @@
 
 set -euo pipefail
 
-# ── Reattach stdin to the controlling tty ─────────────────────────────────────
-# When run via `curl … | bash`, stdin IS the script body. Reopen it from the
-# user's terminal so npx's interactive prompts work. /dev/tty may exist in the
-# filesystem but be unopenable (containers, CI with no tty, etc.) — probe in a
-# subshell first so a failed exec under `set -e` doesn't silently kill us.
+# ── Self-bootstrap for interactive prompts under `curl … | bash` ─────────────
+# Bash reads the script from stdin lazily under curl|bash; redirecting stdin
+# mid-script would hang bash waiting for more of itself. Instead, re-download
+# the script to a temp file and re-exec bash with </dev/tty so npx prompts
+# work. If /dev/tty isn't openable (containers, CI), fall through — the user
+# should pass --yes / ORVEX_BMAD_YES=1 in those environments.
 if [ ! -t 0 ] && [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; then
-  exec </dev/tty
+  command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required to self-bootstrap" >&2; exit 1; }
+  _SCRIPT_URL="${ORVEX_BMAD_SCRIPT_URL:-https://orvex.sh/install/bmad}"
+  _SCRIPT_TMP="$(mktemp -t orvex-bmad.XXXXXX 2>/dev/null || mktemp)"
+  trap 'rm -f "$_SCRIPT_TMP"' EXIT
+  curl -fsSL "$_SCRIPT_URL" -o "$_SCRIPT_TMP" || { echo "ERROR: download failed: $_SCRIPT_URL" >&2; exit 1; }
+  exec bash "$_SCRIPT_TMP" "$@" </dev/tty
 fi
 
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
