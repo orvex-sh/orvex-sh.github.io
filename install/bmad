@@ -77,9 +77,15 @@ else
   read -r EXTRA_MODULES
 fi
 
-# Build the final --modules list. bmm always first. Strip whitespace + dedupe bmm.
-EXTRA_MODULES="$(printf '%s' "${EXTRA_MODULES:-}" | tr -d ' ' | sed -E 's/(^|,)bmm($|,)/\1\2/g; s/,+/,/g; s/^,//; s/,$//')"
-MODULES="bmm${EXTRA_MODULES:+,$EXTRA_MODULES}"
+# Build the final --modules list. bmm always first. Strip whitespace + every bmm token.
+_FILTERED=""
+_OLD_IFS="$IFS"; IFS=,
+for tok in $(printf '%s' "${EXTRA_MODULES:-}" | tr -d ' '); do
+  [ -z "$tok" ] || [ "$tok" = "bmm" ] && continue
+  _FILTERED="${_FILTERED:+$_FILTERED,}$tok"
+done
+IFS="$_OLD_IFS"
+MODULES="bmm${_FILTERED:+,$_FILTERED}"
 printf "  ${D}installing:${R} ${B}%s${R} ${D}+ orvex modules from %s${R}\n" "$MODULES" "$REPO"
 echo
 
