@@ -7,9 +7,14 @@
 # Or download + inspect first:
 #   curl -fsSL orvex.sh/install/bmad -o /tmp/install-bmad && bash /tmp/install-bmad
 #
+# By default the install is interactive — bmad-method asks for module config
+# values (linear_tenant, docmost_url, etc.) per each module.yaml's prompts.
+# For CI / non-interactive: pass --yes or set ORVEX_BMAD_YES=1.
+#
 # Optional environment overrides:
 #   ORVEX_BMAD_REPO     git URL to clone (default: git@github.com:orvexai/bmad-modules)
 #   ORVEX_BMAD_DIR      target project dir (default: current working dir)
+#   ORVEX_BMAD_YES=1    skip all prompts; use module defaults (= --yes)
 #
 # What it does:
 #   1. npx bmad-method install --modules bmm --custom-source <repo> --tools claude-code --yes
@@ -24,8 +29,26 @@
 
 set -euo pipefail
 
+# ── Reattach stdin to the controlling tty ─────────────────────────────────────
+# When the script is run via `curl … | bash`, our stdin IS the script body —
+# any interactive child process (npx prompts) would otherwise read the rest of
+# the script as its "answers". Reopen stdin from the user's terminal so prompts
+# work. If we're already on a tty (saved + run manually) this is a no-op.
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+  exec </dev/tty
+fi
+
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
 TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
+
+# Pass --yes / -y / ORVEX_BMAD_YES=1 to skip prompts (CI / automation).
+NPX_YES=""
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) NPX_YES="--yes" ;;
+  esac
+done
+if [ "${ORVEX_BMAD_YES:-0}" = "1" ]; then NPX_YES="--yes"; fi
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
@@ -71,12 +94,14 @@ fi
 
 # ── Install ───────────────────────────────────────────────────────────────────
 step "1/3 — npx bmad-method install ..."
+# No --yes here so module.yaml prompts (linear_tenant, docmost_url, etc.) fire.
+# Pass --yes via `bash … --yes` or ORVEX_BMAD_YES=1 if you want CI/non-interactive.
 npx --yes bmad-method install \
   --directory . \
   --modules bmm \
   --custom-source "$REPO" \
   --tools claude-code \
-  --yes
+  $NPX_YES
 ok "core + bmm + lnr + doc installed under $TARGET_DIR/_bmad/"
 
 # ── Patch ─────────────────────────────────────────────────────────────────────
