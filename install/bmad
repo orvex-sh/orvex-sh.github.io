@@ -7,8 +7,15 @@
 # else (IDE/tools, per-module config) is interactive.
 #
 # Env overrides:
-#   ORVEX_BMAD_REPO   git URL (default: git@github.com:orvexai/bmad-modules)
-#   ORVEX_BMAD_DIR    target dir (default: current working dir)
+#   ORVEX_BMAD_REPO            git URL (default: git@github.com:orvexai/bmad-modules)
+#   ORVEX_BMAD_DIR             target dir (default: current working dir)
+#   ORVEX_BMAD_MODULES         extra official modules beyond bmm (comma-separated, e.g. "tea,gds")
+#   ORVEX_BMAD_EXTRA_SOURCES   extra --custom-source URLs (comma-separated, layered onto orvex)
+#
+# Examples:
+#   ORVEX_BMAD_MODULES=tea curl -fsSL orvex.sh/install/bmad | bash       # + Test Architecture
+#   ORVEX_BMAD_EXTRA_SOURCES=https://github.com/some/repo \
+#     curl -fsSL orvex.sh/install/bmad | bash                            # + another module repo
 
 set -euo pipefail
 
@@ -26,6 +33,14 @@ fi
 
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
 TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
+
+# bmm is always installed (orvex modules require it); ORVEX_BMAD_MODULES layers on more.
+EXTRA_MODULES="${ORVEX_BMAD_MODULES:-}"
+MODULES="bmm${EXTRA_MODULES:+,$EXTRA_MODULES}"
+
+# Layer additional --custom-source URLs onto the orvex repo.
+EXTRA_SOURCES="${ORVEX_BMAD_EXTRA_SOURCES:-}"
+SOURCES="$REPO${EXTRA_SOURCES:+,$EXTRA_SOURCES}"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
@@ -53,8 +68,8 @@ printf "\n${B}orvex bmad installer${R}  ${D}→ %s${R}\n\n" "$(pwd)"
 # (Stdout stays untouched so interactive prompts work cleanly.)
 npx --yes bmad-method install \
   --directory . \
-  --modules bmm \
-  --custom-source "$REPO" \
+  --modules "$MODULES" \
+  --custom-source "$SOURCES" \
   2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lnr|doc)|lnr/module-help\.csv header does not match' >&2)
 
 # ── Patch (idempotent — quiet on success) ────────────────────────────────────
