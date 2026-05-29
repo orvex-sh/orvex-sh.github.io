@@ -134,6 +134,33 @@ for src in _bmad/lnr/overrides/*.toml _bmad/doc/overrides/*.toml; do
   fi
 done
 
+# ── Ensure module skills land as Claude skills ───────────────────────────────
+# bmad-method re-syncs a custom module's data/overrides on re-install but does
+# NOT add skills newly registered in module.yaml since the last install: custom
+# modules are pinned to branch "main", so the module reads as "up to date" and
+# its skill set is never re-scanned. Result: skills added without a version bump
+# are missing on re-install. Copy every orvex module skill straight into
+# .claude/skills/ from a fresh shallow clone of the source, idempotently, so new
+# skills always land. Skill names are disjoint across orvex modules — safe to
+# refresh. (Best-effort: a clone failure leaves whatever bmad-method installed.)
+_SK_SRC="$(mktemp -d 2>/dev/null)"
+if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; then
+  _SK_N=0
+  for _mod in bmad-docmost bmad-linear; do
+    [ -d "$_SK_SRC/$_mod/skills" ] || continue
+    for _sk in "$_SK_SRC/$_mod/skills"/*/; do
+      [ -f "${_sk}SKILL.md" ] || continue
+      _n="$(basename "$_sk")"
+      mkdir -p ".claude/skills/$_n"
+      if ! cmp -s "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" 2>/dev/null; then
+        cp -f "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" && _SK_N=$((_SK_N + 1))
+      fi
+    done
+  done
+  [ "$_SK_N" -gt 0 ] && printf "  ${D}synced %s module skill(s) → .claude/skills/${R}\n" "$_SK_N"
+fi
+[ -n "$_SK_SRC" ] && rm -rf "$_SK_SRC"
+
 # ── Docmost bootstrap via orvex-doc ──────────────────────────────────────────
 # Resolves docmost_space (slug from space name) + docmost_default_owner_id
 # (UUID from authenticated user). Both required at runtime; we fail loud
