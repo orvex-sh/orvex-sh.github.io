@@ -106,10 +106,33 @@ else
   fail "_bmad/lnr/bin/apply-patch.sh not found — install incomplete?"
 fi
 
-# ── Overrides ────────────────────────────────────────────────────────────────
+# ── Overrides (merge-aware) ──────────────────────────────────────────────────
+# bmad-create-story.toml is contributed by BOTH lnr and doc → a blanket copy
+# would clobber one module's keys (Linear's tracking_system/adapter OR the
+# wiki-first facts). The docmost override is purely additive
+# ([workflow].persistent_facts), so UNION its items into the already-copied
+# file's persistent_facts array instead of overwriting. All other overrides copy
+# straight across (they target disjoint skills).
 mkdir -p _bmad/custom
-cp _bmad/lnr/overrides/*.toml _bmad/custom/ 2>/dev/null || true
-cp _bmad/doc/overrides/*.toml _bmad/custom/ 2>/dev/null || true
+for src in _bmad/lnr/overrides/*.toml _bmad/doc/overrides/*.toml; do
+  [ -e "$src" ] || continue
+  dest="_bmad/custom/$(basename "$src")"
+  if [ "$(basename "$src")" = "bmad-create-story.toml" ] && [ -e "$dest" ]; then
+    # Strip full-line comments first so an example array inside a header comment
+    # can't confuse extraction; capture only the real persistent_facts items.
+    add="$(grep -v '^[[:space:]]*#' "$src" \
+           | awk '/persistent_facts[[:space:]]*=[[:space:]]*\[/{f=1;next} f&&/^[[:space:]]*\]/{f=0} f')"
+    if [ -n "$add" ]; then
+      awk -v add="$add" '
+        $0 !~ /^[[:space:]]*#/ && /persistent_facts[[:space:]]*=[[:space:]]*\[/ {pf=1}
+        pf && /^[[:space:]]*\]/ && !done {print add; done=1; pf=0}
+        {print}
+      ' "$dest" > "$dest.tmp" && mv "$dest.tmp" "$dest"
+    fi
+  else
+    cp "$src" "$dest"
+  fi
+done
 
 # ── Docmost bootstrap via orvex-doc ──────────────────────────────────────────
 # Resolves docmost_space (slug from space name) + docmost_default_owner_id
