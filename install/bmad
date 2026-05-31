@@ -158,6 +158,25 @@ if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; 
     done
   done
   [ "$_SK_N" -gt 0 ] && printf "  ${D}synced %s module skill(s) → .claude/skills/${R}\n" "$_SK_N"
+
+  # Same story for plugin SLASH COMMANDS: bmad-method installs a custom module's
+  # data/overrides but does NOT surface its commands/ as Claude slash commands.
+  # Copy each module's commands/*.md → .claude/commands/ idempotently so the
+  # /doc-* commands work on this (BMAD-module) install path, not just on /plugin
+  # install. Command filenames are disjoint across orvex modules.
+  _CMD_N=0
+  for _mod in bmad-docmost bmad-linear; do
+    [ -d "$_SK_SRC/$_mod/commands" ] || continue
+    mkdir -p .claude/commands
+    for _cmd in "$_SK_SRC/$_mod/commands"/*.md; do
+      [ -f "$_cmd" ] || continue
+      _cn="$(basename "$_cmd")"
+      if ! cmp -s "$_cmd" ".claude/commands/$_cn" 2>/dev/null; then
+        cp -f "$_cmd" ".claude/commands/$_cn" && _CMD_N=$((_CMD_N + 1))
+      fi
+    done
+  done
+  [ "$_CMD_N" -gt 0 ] && printf "  ${D}synced %s slash command(s) → .claude/commands/${R}\n" "$_CMD_N"
 fi
 [ -n "$_SK_SRC" ] && rm -rf "$_SK_SRC"
 
