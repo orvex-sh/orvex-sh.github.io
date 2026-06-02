@@ -210,11 +210,11 @@ printf "  ${D}owner: %s${R} ${B}%s${R}\n" "$OWNER_EMAIL" "$OWNER_ID"
 
 # Pick space (by number, name, or slug)
 SPACES_JSON="$(docmost-cli space list --output json 2>/dev/null)" || fail "docmost-cli space list failed"
-SPACE_COUNT="$(printf '%s' "$SPACES_JSON" | jq 'length')"
+SPACE_COUNT="$(printf '%s' "$SPACES_JSON" | jq '.items | length')"
 [ "$SPACE_COUNT" -gt 0 ] || fail "no Docmost spaces visible — check your auth profile"
 
 printf "\n  ${B}Pick a space for this project:${R}\n"
-printf '%s' "$SPACES_JSON" | jq -r '. as $arr | range(0; ($arr | length)) | "    \(. + 1). \($arr[.].name)  [\($arr[.].slug)]"'
+printf '%s' "$SPACES_JSON" | jq -r '.items as $arr | range(0; ($arr | length)) | "    \(. + 1). \($arr[.].name)  [\($arr[.].slug)]"'
 
 printf "\n  ${B}Number, name, or slug:${R} "
 read -r SPACE_INPUT
@@ -223,12 +223,12 @@ read -r SPACE_INPUT
 SPACE_SLUG=""
 # numeric → index
 if [ "$SPACE_INPUT" -eq "$SPACE_INPUT" ] 2>/dev/null; then
-  SPACE_SLUG="$(printf '%s' "$SPACES_JSON" | jq -r --argjson i "$((SPACE_INPUT - 1))" '.[$i].slug // empty')"
+  SPACE_SLUG="$(printf '%s' "$SPACES_JSON" | jq -r --argjson i "$((SPACE_INPUT - 1))" '.items[$i].slug // empty')"
 fi
 # fallback: match by exact name (case-insensitive) or slug
 if [ -z "$SPACE_SLUG" ]; then
   SPACE_SLUG="$(printf '%s' "$SPACES_JSON" | jq -r --arg q "$SPACE_INPUT" '
-    [.[] | select(
+    [.items[] | select(
       .slug == $q
       or .name == $q
       or (.name | ascii_downcase) == ($q | ascii_downcase)
@@ -236,8 +236,8 @@ if [ -z "$SPACE_SLUG" ]; then
   ')"
 fi
 [ -n "$SPACE_SLUG" ] && [ "$SPACE_SLUG" != "null" ] || fail "space '$SPACE_INPUT' not found.
-       Available: $(printf '%s' "$SPACES_JSON" | jq -r '[.[].slug] | join(", ")')"
-SPACE_NAME="$(printf '%s' "$SPACES_JSON" | jq -r --arg s "$SPACE_SLUG" '[.[] | select(.slug == $s)] | first.name')"
+       Available: $(printf '%s' "$SPACES_JSON" | jq -r '[.items[].slug] | join(", ")')"
+SPACE_NAME="$(printf '%s' "$SPACES_JSON" | jq -r --arg s "$SPACE_SLUG" '[.items[] | select(.slug == $s)] | first.name')"
 printf "  ${D}space:${R} ${B}%s${R}  ${D}(%s)${R}\n" "$SPACE_NAME" "$SPACE_SLUG"
 
 # Write team-shared config (committable) — slug only
