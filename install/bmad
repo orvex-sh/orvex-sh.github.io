@@ -98,6 +98,79 @@ npx --yes bmad-method install \
   --custom-source "$SOURCES" \
   2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lnr|doc)|lnr/module-help\.csv header does not match' >&2)
 
+# ── Ensure orvex module content is fresh ─────────────────────────────────────
+# On an existing install, bmad-method's "Quick Update" path can decide there is
+# "no source available" for custom modules and SKIP lnr/doc entirely — even
+# though --custom-source was passed — leaving _bmad/lnr/ and _bmad/doc/
+# (bin/, data/, overrides/, skills/, commands/) pinned to whatever an earlier
+# install copied. That silently starves apply-patch.sh of new patch-set dirs
+# (e.g. bin/patches/6.9/) after a bmm version bump. Work around it: shallow
+# clone the source repo and mirror bin/, data/, and overrides/ straight into
+# _bmad/<code>/ for each orvex module (idempotent — only changed files are
+# rewritten), PLUS skills/ and commands/ into their Claude-side install paths
+# (bmad-method installs a custom module's data/ dir but not its bin/, and does
+# not re-scan skills/commands/ for entries added without a version bump).
+# Must run BEFORE apply-patch.sh, which depends on a fresh bin/patches/.
+# Skill/command names and module dirs are disjoint across orvex modules — safe
+# to refresh. Best-effort: a clone failure leaves whatever bmad-method installed.
+declare -A _MOD_CODE=( [bmad-linear]=lnr [bmad-docmost]=doc )
+_SK_SRC="$(mktemp -d 2>/dev/null)"
+if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; then
+  _MOD_N=0
+  for _mod in bmad-docmost bmad-linear; do
+    _code="${_MOD_CODE[$_mod]}"
+    for _sub in bin data overrides; do
+      [ -d "$_SK_SRC/$_mod/$_sub" ] || continue
+      mkdir -p "_bmad/$_code/$_sub"
+      while IFS= read -r -d '' _f; do
+        _rel="${_f#"$_SK_SRC/$_mod/$_sub/"}"
+        _dest="_bmad/$_code/$_sub/$_rel"
+        mkdir -p "$(dirname "$_dest")"
+        if ! cmp -s "$_f" "$_dest" 2>/dev/null; then
+          cp -f "$_f" "$_dest" && _MOD_N=$((_MOD_N + 1))
+        fi
+      done < <(find "$_SK_SRC/$_mod/$_sub" -type f -print0)
+    done
+  done
+  [ "$_MOD_N" -gt 0 ] && printf "  ${D}synced %s module file(s) → _bmad/{lnr,doc}/{bin,data,overrides}/${R}\n" "$_MOD_N"
+
+  _SK_N=0
+  for _mod in bmad-docmost bmad-linear; do
+    [ -d "$_SK_SRC/$_mod/skills" ] || continue
+    for _sk in "$_SK_SRC/$_mod/skills"/*/; do
+      [ -f "${_sk}SKILL.md" ] || continue
+      _n="$(basename "$_sk")"
+      mkdir -p ".claude/skills/$_n"
+      if ! cmp -s "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" 2>/dev/null; then
+        cp -f "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" && _SK_N=$((_SK_N + 1))
+      fi
+    done
+  done
+  [ "$_SK_N" -gt 0 ] && printf "  ${D}synced %s module skill(s) → .claude/skills/${R}\n" "$_SK_N"
+
+  # Same story for plugin SLASH COMMANDS: bmad-method installs a custom module's
+  # data/overrides but does NOT surface its commands/ as Claude slash commands.
+  # Copy each module's commands/*.md → .claude/commands/ idempotently so the
+  # /doc-* commands work on this (BMAD-module) install path, not just on /plugin
+  # install. Command filenames are disjoint across orvex modules.
+  _CMD_N=0
+  for _mod in bmad-docmost bmad-linear; do
+    [ -d "$_SK_SRC/$_mod/commands" ] || continue
+    mkdir -p .claude/commands
+    for _cmd in "$_SK_SRC/$_mod/commands"/*.md; do
+      [ -f "$_cmd" ] || continue
+      _cn="$(basename "$_cmd")"
+      if ! cmp -s "$_cmd" ".claude/commands/$_cn" 2>/dev/null; then
+        cp -f "$_cmd" ".claude/commands/$_cn" && _CMD_N=$((_CMD_N + 1))
+      fi
+    done
+  done
+  [ "$_CMD_N" -gt 0 ] && printf "  ${D}synced %s slash command(s) → .claude/commands/${R}\n" "$_CMD_N"
+else
+  printf "  ${D}(warn: could not clone %s to refresh module content — using whatever bmad-method installed)${R}\n" "$REPO"
+fi
+[ -n "$_SK_SRC" ] && rm -rf "$_SK_SRC"
+
 # ── Patch (idempotent — quiet on success) ────────────────────────────────────
 if [ -f "_bmad/lnr/bin/apply-patch.sh" ]; then
   printf "\n"
@@ -133,52 +206,6 @@ for src in _bmad/lnr/overrides/*.toml _bmad/doc/overrides/*.toml; do
     cp "$src" "$dest"
   fi
 done
-
-# ── Ensure module skills land as Claude skills ───────────────────────────────
-# bmad-method re-syncs a custom module's data/overrides on re-install but does
-# NOT add skills newly registered in module.yaml since the last install: custom
-# modules are pinned to branch "main", so the module reads as "up to date" and
-# its skill set is never re-scanned. Result: skills added without a version bump
-# are missing on re-install. Copy every orvex module skill straight into
-# .claude/skills/ from a fresh shallow clone of the source, idempotently, so new
-# skills always land. Skill names are disjoint across orvex modules — safe to
-# refresh. (Best-effort: a clone failure leaves whatever bmad-method installed.)
-_SK_SRC="$(mktemp -d 2>/dev/null)"
-if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; then
-  _SK_N=0
-  for _mod in bmad-docmost bmad-linear; do
-    [ -d "$_SK_SRC/$_mod/skills" ] || continue
-    for _sk in "$_SK_SRC/$_mod/skills"/*/; do
-      [ -f "${_sk}SKILL.md" ] || continue
-      _n="$(basename "$_sk")"
-      mkdir -p ".claude/skills/$_n"
-      if ! cmp -s "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" 2>/dev/null; then
-        cp -f "${_sk}SKILL.md" ".claude/skills/$_n/SKILL.md" && _SK_N=$((_SK_N + 1))
-      fi
-    done
-  done
-  [ "$_SK_N" -gt 0 ] && printf "  ${D}synced %s module skill(s) → .claude/skills/${R}\n" "$_SK_N"
-
-  # Same story for plugin SLASH COMMANDS: bmad-method installs a custom module's
-  # data/overrides but does NOT surface its commands/ as Claude slash commands.
-  # Copy each module's commands/*.md → .claude/commands/ idempotently so the
-  # /doc-* commands work on this (BMAD-module) install path, not just on /plugin
-  # install. Command filenames are disjoint across orvex modules.
-  _CMD_N=0
-  for _mod in bmad-docmost bmad-linear; do
-    [ -d "$_SK_SRC/$_mod/commands" ] || continue
-    mkdir -p .claude/commands
-    for _cmd in "$_SK_SRC/$_mod/commands"/*.md; do
-      [ -f "$_cmd" ] || continue
-      _cn="$(basename "$_cmd")"
-      if ! cmp -s "$_cmd" ".claude/commands/$_cn" 2>/dev/null; then
-        cp -f "$_cmd" ".claude/commands/$_cn" && _CMD_N=$((_CMD_N + 1))
-      fi
-    done
-  done
-  [ "$_CMD_N" -gt 0 ] && printf "  ${D}synced %s slash command(s) → .claude/commands/${R}\n" "$_CMD_N"
-fi
-[ -n "$_SK_SRC" ] && rm -rf "$_SK_SRC"
 
 # ── Docmost bootstrap via docmost-cli ──────────────────────────────────────────
 # Resolves docmost_space (slug from space name) + docmost_default_owner_id
