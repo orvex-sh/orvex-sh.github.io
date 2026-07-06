@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# orvex.sh/install/bmad — install orvex BMAD 6.8 modules.
+# orvex.sh/install/bmad — install orvex BMAD modules.
 #
 #   curl -fsSL orvex.sh/install/bmad | bash
 #
@@ -103,8 +103,10 @@ npx --yes bmad-method install \
 # "no source available" for custom modules and SKIP lnr/doc entirely — even
 # though --custom-source was passed — leaving _bmad/lnr/ and _bmad/doc/
 # (bin/, data/, overrides/, skills/, commands/) pinned to whatever an earlier
-# install copied. That silently starves apply-patch.sh of new patch-set dirs
-# (e.g. bin/patches/6.9/) after a bmm version bump. Work around it: shallow
+# install copied. That silently starves apply-patch.sh of new patch content
+# — the engine's floor-match falls back to the nearest older validated
+# <MAJOR.MINOR>/ patch set automatically on a bmm bump, but only if bin/patches/
+# itself was ever pulled down in the first place. Work around it: shallow
 # clone the source repo and mirror bin/, data/, and overrides/ straight into
 # _bmad/<code>/ for each orvex module (idempotent — only changed files are
 # rewritten), PLUS skills/ and commands/ into their Claude-side install paths
