@@ -33,12 +33,6 @@ fi
 
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
 TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
-# Pin, don't float to @latest: an unpinned `npx bmad-method` jumping several
-# minors on an existing install (e.g. 6.8.0 -> 6.10.0) has been observed to
-# choke reading the old manifest ("Cannot read properties of null (reading
-# 'modules')") and reset it to a bare `core`-only stub, discarding module
-# history for an install/update that otherwise completed fine on disk.
-BMAD_METHOD_VERSION="${ORVEX_BMAD_METHOD_VERSION:-6.10.0}"
 
 # Layer additional --custom-source URLs onto the orvex repo.
 EXTRA_SOURCES="${ORVEX_BMAD_EXTRA_SOURCES:-}"
@@ -62,6 +56,24 @@ command -v npx >/dev/null 2>&1 || fail "npx not found"
 command -v git >/dev/null 2>&1 || fail "git not found"
 [ -d "$TARGET_DIR" ] || fail "target dir not found: $TARGET_DIR"
 cd "$TARGET_DIR"
+
+# ── bmad-method version to run ────────────────────────────────────────────────
+# Match whatever this project already has installed, rather than floating to
+# @latest: an unpinned `npx bmad-method` jumping several minors on an existing
+# install (e.g. 6.8.0 -> 6.10.0 observed) has choked reading the old manifest
+# ("Cannot read properties of null (reading 'modules')") and reset it to a
+# bare `core`-only stub, discarding module history for an install/update that
+# otherwise completed fine on disk. No manifest yet (fresh install) -> no
+# constraint, just use latest. To deliberately move a project to a newer BMAD
+# release, set ORVEX_BMAD_METHOD_VERSION for that one run; the new version
+# then becomes what subsequent unset runs match.
+MANIFEST="_bmad/_config/manifest.yaml"
+INSTALLED_VERSION=""
+if [ -f "$MANIFEST" ]; then
+  INSTALLED_VERSION="$(awk '/^installation:/{f=1;next} /^modules:/{f=0} f && /version:/{print $2; exit}' "$MANIFEST")"
+fi
+BMAD_METHOD_VERSION="${ORVEX_BMAD_METHOD_VERSION:-$INSTALLED_VERSION}"
+BMAD_PKG="bmad-method${BMAD_METHOD_VERSION:+@$BMAD_METHOD_VERSION}"
 
 printf "\n${B}orvex bmad installer${R}  ${D}→ %s${R}\n" "$(pwd)"
 
@@ -96,10 +108,9 @@ printf "  ${D}installing:${R} ${B}%s${R} ${D}+ orvex modules from %s${R}\n" "$MO
 echo
 
 # ── Manifest safety net ───────────────────────────────────────────────────────
-# On an existing install, back up the manifest so a botched update (see the
-# version-pin note above) can be detected and reverted instead of silently
-# leaving an installed project's module history erased.
-MANIFEST="_bmad/_config/manifest.yaml"
+# Back up the manifest so a botched run (see the version note above) can be
+# detected and reverted instead of silently erasing an installed project's
+# module history.
 MANIFEST_BAK=""
 if [ -f "$MANIFEST" ]; then
   MANIFEST_BAK="$(mktemp -t orvex-bmad-manifest.XXXXXX 2>/dev/null || mktemp)"
@@ -111,7 +122,7 @@ fi
 # installer itself detects an existing manifest and offers Quick Update /
 # Modify. Filter known-cosmetic post-install warnings on stderr so they don't
 # clutter. (Stdout stays untouched so interactive prompts work cleanly.)
-npx --yes "bmad-method@${BMAD_METHOD_VERSION}" install \
+npx --yes "$BMAD_PKG" install \
   --directory . \
   --modules "$MODULES" \
   --custom-source "$SOURCES" \
@@ -126,8 +137,8 @@ if [ -n "$MANIFEST_BAK" ]; then
     cp "$MANIFEST_BAK" "$MANIFEST"
     rm -f "$MANIFEST_BAK"
     fail "installer reset $MANIFEST from $PREV_MODULE_COUNT module(s) to $NEW_MODULE_COUNT — restored the prior manifest and aborted.
-       This usually means bmad-method@${BMAD_METHOD_VERSION} couldn't read the existing manifest.
-       Check what changed in the manifest schema between your installed version and ${BMAD_METHOD_VERSION}, or re-run with ORVEX_BMAD_METHOD_VERSION pinned to your currently-installed bmad-method version."
+       This usually means $BMAD_PKG couldn't read the existing manifest.
+       If you passed ORVEX_BMAD_METHOD_VERSION to jump releases, check that release's manifest-schema/migration notes first."
   fi
   rm -f "$MANIFEST_BAK"
 fi
