@@ -33,6 +33,12 @@ fi
 
 REPO="${ORVEX_BMAD_REPO:-git@github.com:orvexai/bmad-modules}"
 TARGET_DIR="${ORVEX_BMAD_DIR:-$(pwd)}"
+# Pin, don't float to @latest: an unpinned `npx bmad-method` jumping several
+# minors on an existing install (e.g. 6.8.0 -> 6.10.0) has been observed to
+# choke reading the old manifest ("Cannot read properties of null (reading
+# 'modules')") and reset it to a bare `core`-only stub, discarding module
+# history for an install/update that otherwise completed fine on disk.
+BMAD_METHOD_VERSION="${ORVEX_BMAD_METHOD_VERSION:-6.10.0}"
 
 # Layer additional --custom-source URLs onto the orvex repo.
 EXTRA_SOURCES="${ORVEX_BMAD_EXTRA_SOURCES:-}"
@@ -89,14 +95,42 @@ MODULES="bmm${_FILTERED:+,$_FILTERED}"
 printf "  ${D}installing:${R} ${B}%s${R} ${D}+ orvex modules from %s${R}\n" "$MODULES" "$REPO"
 echo
 
+# ── Manifest safety net ───────────────────────────────────────────────────────
+# On an existing install, back up the manifest so a botched update (see the
+# version-pin note above) can be detected and reverted instead of silently
+# leaving an installed project's module history erased.
+MANIFEST="_bmad/_config/manifest.yaml"
+MANIFEST_BAK=""
+if [ -f "$MANIFEST" ]; then
+  MANIFEST_BAK="$(mktemp -t orvex-bmad-manifest.XXXXXX 2>/dev/null || mktemp)"
+  cp "$MANIFEST" "$MANIFEST_BAK"
+fi
+
 # ── Install — interactive, only orvex modules + bmm dep are preselected ──────
-# Filter known-cosmetic post-install warnings on stderr so they don't clutter.
-# (Stdout stays untouched so interactive prompts work cleanly.)
-npx --yes bmad-method install \
+# Same command for a fresh install and an upgrade of an existing one — the
+# installer itself detects an existing manifest and offers Quick Update /
+# Modify. Filter known-cosmetic post-install warnings on stderr so they don't
+# clutter. (Stdout stays untouched so interactive prompts work cleanly.)
+npx --yes "bmad-method@${BMAD_METHOD_VERSION}" install \
   --directory . \
   --modules "$MODULES" \
   --custom-source "$SOURCES" \
   2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lnr|doc)|lnr/module-help\.csv header does not match' >&2)
+
+# If a prior manifest existed, make sure the installer didn't collapse it back
+# down to a bare `core`-only stub (the failure mode this pin works around).
+if [ -n "$MANIFEST_BAK" ]; then
+  PREV_MODULE_COUNT="$(grep -c '^  - name:' "$MANIFEST_BAK" || true)"
+  NEW_MODULE_COUNT="$(grep -c '^  - name:' "$MANIFEST" 2>/dev/null || true)"
+  if [ "${NEW_MODULE_COUNT:-0}" -lt "${PREV_MODULE_COUNT:-0}" ]; then
+    cp "$MANIFEST_BAK" "$MANIFEST"
+    rm -f "$MANIFEST_BAK"
+    fail "installer reset $MANIFEST from $PREV_MODULE_COUNT module(s) to $NEW_MODULE_COUNT — restored the prior manifest and aborted.
+       This usually means bmad-method@${BMAD_METHOD_VERSION} couldn't read the existing manifest.
+       Check what changed in the manifest schema between your installed version and ${BMAD_METHOD_VERSION}, or re-run with ORVEX_BMAD_METHOD_VERSION pinned to your currently-installed bmad-method version."
+  fi
+  rm -f "$MANIFEST_BAK"
+fi
 
 # ── Ensure orvex module content is fresh ─────────────────────────────────────
 # On an existing install, bmad-method's "Quick Update" path can decide there is
