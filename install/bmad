@@ -230,29 +230,36 @@ fi
 # bmad-create-story.toml is contributed by BOTH lnr and doc → a blanket copy
 # would clobber one module's keys (Linear's tracking_system/adapter OR the
 # wiki-first facts). The docmost override is purely additive
-# ([workflow].persistent_facts), so UNION its items into the already-copied
-# file's persistent_facts array instead of overwriting. All other overrides copy
-# straight across (they target disjoint skills).
+# ([workflow].persistent_facts), so UNION its items into lnr's copy instead of
+# overwriting it. lnr's own file is always a fresh straight copy (never
+# conditioned on whether dest already exists) so re-running this script never
+# re-merges doc's facts on top of a dest that already has them from a prior
+# run — that accumulation bug produced triplicated persistent_facts entries
+# after repeated installs/updates. All other overrides copy straight across
+# every run (they target disjoint skills, so a plain overwrite is idempotent).
 mkdir -p _bmad/custom
+DOC_CREATE_STORY="_bmad/doc/overrides/bmad-create-story.toml"
 for src in _bmad/lnr/overrides/*.toml _bmad/doc/overrides/*.toml; do
   [ -e "$src" ] || continue
+  [ "$src" = "$DOC_CREATE_STORY" ] && continue
   dest="_bmad/custom/$(basename "$src")"
-  if [ "$(basename "$src")" = "bmad-create-story.toml" ] && [ -e "$dest" ]; then
-    # Strip full-line comments first so an example array inside a header comment
-    # can't confuse extraction; capture only the real persistent_facts items.
-    add="$(grep -v '^[[:space:]]*#' "$src" \
-           | awk '/persistent_facts[[:space:]]*=[[:space:]]*\[/{f=1;next} f&&/^[[:space:]]*\]/{f=0} f')"
-    if [ -n "$add" ]; then
-      awk -v add="$add" '
-        $0 !~ /^[[:space:]]*#/ && /persistent_facts[[:space:]]*=[[:space:]]*\[/ {pf=1}
-        pf && /^[[:space:]]*\]/ && !done {print add; done=1; pf=0}
-        {print}
-      ' "$dest" > "$dest.tmp" && mv "$dest.tmp" "$dest"
-    fi
-  else
-    cp "$src" "$dest"
-  fi
+  cp "$src" "$dest"
 done
+if [ -e "$DOC_CREATE_STORY" ]; then
+  dest="_bmad/custom/bmad-create-story.toml"
+  [ -e "$dest" ] || cp "_bmad/lnr/overrides/bmad-create-story.toml" "$dest"
+  # Strip full-line comments first so an example array inside a header comment
+  # can't confuse extraction; capture only the real persistent_facts items.
+  add="$(grep -v '^[[:space:]]*#' "$DOC_CREATE_STORY" \
+         | awk '/persistent_facts[[:space:]]*=[[:space:]]*\[/{f=1;next} f&&/^[[:space:]]*\]/{f=0} f')"
+  if [ -n "$add" ]; then
+    awk -v add="$add" '
+      $0 !~ /^[[:space:]]*#/ && /persistent_facts[[:space:]]*=[[:space:]]*\[/ {pf=1}
+      pf && /^[[:space:]]*\]/ && !done {print add; done=1; pf=0}
+      {print}
+    ' "$dest" > "$dest.tmp" && mv "$dest.tmp" "$dest"
+  fi
+fi
 
 # ── Docmost bootstrap via docmost-cli ──────────────────────────────────────────
 # Resolves docmost_space (slug from space name) + docmost_default_owner_id
