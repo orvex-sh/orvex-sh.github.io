@@ -63,19 +63,86 @@ cd "$TARGET_DIR"
 # install (e.g. 6.8.0 -> 6.10.0 observed) has choked reading the old manifest
 # ("Cannot read properties of null (reading 'modules')") and reset it to a
 # bare `core`-only stub, discarding module history for an install/update that
-# otherwise completed fine on disk. No manifest yet (fresh install) -> no
-# constraint, just use latest. To deliberately move a project to a newer BMAD
-# release, set ORVEX_BMAD_METHOD_VERSION for that one run; the new version
-# then becomes what subsequent unset runs match.
+# otherwise completed fine on disk. No manifest yet (fresh install) -> resolve
+# the registry's latest and pin THAT; the spec handed to npx is always pinned,
+# never the bare package name. Matching is floored at BMAD_MIN_VERSION below.
+# To deliberately move a project to a newer BMAD release, set
+# ORVEX_BMAD_METHOD_VERSION for that one run; the new version then becomes what
+# subsequent unset runs match.
 MANIFEST="_bmad/_config/manifest.yaml"
 INSTALLED_VERSION=""
 if [ -f "$MANIFEST" ]; then
   INSTALLED_VERSION="$(awk '/^installation:/{f=1;next} /^modules:/{f=0} f && /version:/{print $2; exit}' "$MANIFEST")"
 fi
 BMAD_METHOD_VERSION="${ORVEX_BMAD_METHOD_VERSION:-$INSTALLED_VERSION}"
-BMAD_PKG="bmad-method${BMAD_METHOD_VERSION:+@$BMAD_METHOD_VERSION}"
+
+# The FLOOR that version-matching must never go below. This installer's whole
+# premise is `--custom-source` (that is how the orvex modules get in), and that
+# flag was introduced in 6.3.0 — verified by grepping the published tarballs:
+# 6.2.2 does not contain it, 6.3.0 does. Matching the installed version is right
+# for a project a few minors behind; on one that predates the flag it pins a
+# bmad-method that cannot possibly do the job, and the run dies on
+# "error: unknown option '--custom-source'" with nothing to show for it.
+BMAD_MIN_VERSION="6.3.0"
+
+# True when $1 is strictly older than $2 (semver-ish, via sort -V).
+version_lt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+}
+
+resolve_latest() {
+  npm view bmad-method version 2>/dev/null || true
+}
 
 printf "\n${B}orvex bmad installer${R}  ${D}→ %s${R}\n" "$(pwd)"
+
+# No manifest and no override -> nothing to match, so take the registry's latest.
+if [ -z "$BMAD_METHOD_VERSION" ]; then
+  BMAD_METHOD_VERSION="$(resolve_latest)"
+  [ -n "$BMAD_METHOD_VERSION" ] \
+    || fail "could not resolve the latest bmad-method version from npm.
+       Check network/registry access, or pin one for this run:
+         ORVEX_BMAD_METHOD_VERSION=<version> curl -fsSL orvex.sh/install/bmad | bash"
+fi
+
+# Below the floor there is no "keep this project where it is" option — the
+# install cannot work at all. An explicit override gets a flat refusal; a version
+# merely inherited from an old manifest gets the choice, because upgrading is the
+# only way forward and the user should see the jump before it happens.
+if version_lt "$BMAD_METHOD_VERSION" "$BMAD_MIN_VERSION"; then
+  if [ -n "${ORVEX_BMAD_METHOD_VERSION:-}" ]; then
+    fail "ORVEX_BMAD_METHOD_VERSION=$BMAD_METHOD_VERSION is too old for this installer.
+       --custom-source (how the orvex modules are installed) landed in $BMAD_MIN_VERSION.
+       Pick $BMAD_MIN_VERSION or newer."
+  fi
+
+  LATEST="$(resolve_latest)"
+  [ -n "$LATEST" ] || fail "this project is on BMAD $BMAD_METHOD_VERSION, which predates
+       --custom-source ($BMAD_MIN_VERSION+), and the latest version could not be resolved
+       from npm to upgrade to. Check network/registry access."
+
+  printf "\n  ${B}This project is on BMAD %s${R} ${D}(from %s)${R}\n" "$BMAD_METHOD_VERSION" "$MANIFEST"
+  printf "  ${D}The orvex modules install via --custom-source, added in %s — %s cannot install them.${R}\n" \
+    "$BMAD_MIN_VERSION" "$BMAD_METHOD_VERSION"
+  printf "  ${D}Continuing upgrades this project to ${R}${B}%s${R}${D}. Your manifest is backed up first and${R}\n" "$LATEST"
+  printf "  ${D}restored automatically if the upgrade drops a module it should have kept.${R}\n"
+  printf "\n  ${B}Upgrade %s → %s?${R} ${D}[y/N]:${R} " "$BMAD_METHOD_VERSION" "$LATEST"
+
+  # Bare read, same as the module selector below: under curl|bash the script has
+  # already re-execed with stdin on /dev/tty, so this is interactive in the real
+  # flow. A closed stdin just leaves the answer empty and takes the abort path,
+  # which prints the ORVEX_BMAD_METHOD_VERSION escape hatch.
+  read -r UPGRADE_ANS || UPGRADE_ANS=""
+  case "$UPGRADE_ANS" in
+    [yY] | [yY][eE][sS]) BMAD_METHOD_VERSION="$LATEST" ;;
+    *) fail "aborted — project left on BMAD $BMAD_METHOD_VERSION, nothing written.
+       To upgrade non-interactively:
+         ORVEX_BMAD_METHOD_VERSION=$LATEST curl -fsSL orvex.sh/install/bmad | bash" ;;
+  esac
+fi
+
+# Always run a PINNED spec, never the bare package name.
+BMAD_PKG="bmad-method@$BMAD_METHOD_VERSION"
 
 # ── Module selector ──────────────────────────────────────────────────────────
 # Always installed (non-toggleable): bmm (required by orvex), bmad-linear, bmad-docmost.
@@ -122,11 +189,31 @@ fi
 # installer itself detects an existing manifest and offers Quick Update /
 # Modify. Filter known-cosmetic post-install warnings on stderr so they don't
 # clutter. (Stdout stays untouched so interactive prompts work cleanly.)
+#
+# Don't let `set -e` kill the script on a non-zero exit: the manifest backup
+# above is only useful if we get to act on it, and a failed run is exactly when
+# a half-written manifest needs restoring.
+set +e
 npx --yes "$BMAD_PKG" install \
   --directory . \
   --modules "$MODULES" \
   --custom-source "$SOURCES" \
   2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lnr|doc)|lnr/module-help\.csv header does not match' >&2)
+NPX_RC=$?
+set -e
+
+if [ "$NPX_RC" -ne 0 ]; then
+  if [ -n "$MANIFEST_BAK" ]; then
+    cp "$MANIFEST_BAK" "$MANIFEST"
+    rm -f "$MANIFEST_BAK"
+    printf "  ${D}restored %s from backup${R}\n" "$MANIFEST"
+  fi
+  fail "$BMAD_PKG install failed (exit $NPX_RC).
+       If it reported an unknown option such as --custom-source, that release is
+       too old for this installer — it needs a bmad-method that supports custom
+       module sources (verified on 6.8.0+). Pin a newer one for this run:
+         ORVEX_BMAD_METHOD_VERSION=<version> curl -fsSL orvex.sh/install/bmad | bash"
+fi
 
 # If a prior manifest existed, make sure the installer didn't collapse it back
 # down to a bare `core`-only stub (the failure mode this pin works around).
