@@ -130,16 +130,43 @@ npx --yes "$BMAD_PKG" install \
 
 # If a prior manifest existed, make sure the installer didn't collapse it back
 # down to a bare `core`-only stub (the failure mode this pin works around).
+#
+# Test what this run REQUESTED, not the module COUNT. A count check cannot tell
+# the catastrophic reset apart from a deliberate deselection — dropping a module
+# you no longer want (say a deprecated one) legitimately lowers the count, and
+# aborting on that blocks a correct install and leaves the removal half-done. In
+# the reset failure mode the requested modules go missing too, so requiring
+# their presence catches it without the false positive.
 if [ -n "$MANIFEST_BAK" ]; then
-  PREV_MODULE_COUNT="$(grep -c '^  - name:' "$MANIFEST_BAK" || true)"
-  NEW_MODULE_COUNT="$(grep -c '^  - name:' "$MANIFEST" 2>/dev/null || true)"
-  if [ "${NEW_MODULE_COUNT:-0}" -lt "${PREV_MODULE_COUNT:-0}" ]; then
+  # core is implicit; MODULES is what went to --modules; lnr/doc arrive via
+  # --custom-source and are non-toggleable in this installer.
+  MISSING=""
+  _OLD_IFS="$IFS"; IFS=,
+  for _m in core $MODULES lnr doc; do
+    [ -n "$_m" ] || continue
+    grep -q "^  - name: $_m\$" "$MANIFEST" 2>/dev/null \
+      || MISSING="${MISSING:+$MISSING, }$_m"
+  done
+  IFS="$_OLD_IFS"
+
+  if [ -n "$MISSING" ]; then
     cp "$MANIFEST_BAK" "$MANIFEST"
     rm -f "$MANIFEST_BAK"
-    fail "installer reset $MANIFEST from $PREV_MODULE_COUNT module(s) to $NEW_MODULE_COUNT — restored the prior manifest and aborted.
+    fail "installer left requested module(s) out of $MANIFEST: $MISSING
+       Restored the prior manifest and aborted.
        This usually means $BMAD_PKG couldn't read the existing manifest.
        If you passed ORVEX_BMAD_METHOD_VERSION to jump releases, check that release's manifest-schema/migration notes first."
   fi
+
+  # Modules that went away but were never requested = a deliberate deselection.
+  # Not an error, but name them so an accidental one is visible rather than silent.
+  DROPPED=""
+  while IFS= read -r _m; do
+    grep -q "^  - name: $_m\$" "$MANIFEST" 2>/dev/null \
+      || DROPPED="${DROPPED:+$DROPPED, }$_m"
+  done < <(sed -n 's/^  - name: //p' "$MANIFEST_BAK")
+  [ -n "$DROPPED" ] && printf "  ${D}removed module(s): %s${R}\n" "$DROPPED"
+
   rm -f "$MANIFEST_BAK"
 fi
 
@@ -148,10 +175,11 @@ fi
 # "no source available" for custom modules and SKIP lnr/doc entirely — even
 # though --custom-source was passed — leaving _bmad/lnr/ and _bmad/doc/
 # (bin/, data/, overrides/, skills/, commands/) pinned to whatever an earlier
-# install copied. That silently starves apply-patch.sh of new patch content
-# — the engine's floor-match falls back to the nearest older validated
-# <MAJOR.MINOR>/ patch set automatically on a bmm bump, but only if bin/patches/
-# itself was ever pulled down in the first place. Work around it: shallow
+# install copied. That silently starves apply-patch.sh of new patch content:
+# patch sets are version-neutral (one flat bin/patches/ tracking current
+# upstream), so a stale copy is the ONLY way the engine can end up with anchors
+# that predate the installed skills — and it surfaces as a hard "anchor not
+# found" rather than anything self-healing. Work around it: shallow
 # clone the source repo and mirror bin/, data/, and overrides/ straight into
 # _bmad/<code>/ for each orvex module (idempotent — only changed files are
 # rewritten), PLUS skills/ and commands/ into their Claude-side install paths
@@ -180,6 +208,24 @@ if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; 
     done
   done
   [ "$_MOD_N" -gt 0 ] && printf "  ${D}synced %s module file(s) → _bmad/{lnr,doc}/{bin,data,overrides}/${R}\n" "$_MOD_N"
+
+  # Patch sets used to be tiered per bmm minor (patches/<MAJOR.MINOR>/*.patch);
+  # they are now version-neutral and live flat in patches/. The sync above only
+  # ADDS and overwrites, so on a project installed before that change the old
+  # tier dirs survive forever — dead files the engine ignores, but ones a future
+  # reader would reasonably mistake for the live patch set. Prune exactly those:
+  # numeric-named subdirs of the two patches roots, nothing else.
+  _STALE_N=0
+  for _pr in _bmad/lnr/bin/patches _bmad/doc/data/patches; do
+    [ -d "$_pr" ] || continue
+    for _vd in "$_pr"/*/; do
+      [ -d "$_vd" ] || continue
+      case "$(basename "$_vd")" in
+        [0-9]*.[0-9]*) rm -rf "$_vd" && _STALE_N=$((_STALE_N + 1)) ;;
+      esac
+    done
+  done
+  [ "$_STALE_N" -gt 0 ] && printf "  ${D}pruned %s stale versioned patch dir(s) — patch sets are version-neutral now${R}\n" "$_STALE_N"
 
   _SK_N=0
   for _mod in bmad-docmost bmad-linear; do
