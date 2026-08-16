@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# orvex.sh/install/omnigent — install the orvex build of Omnigent.
+#
+#   curl -fsSL orvex.sh/install/omnigent | bash
+#
+# Clones the private orvexai/omnigent repo, builds the app + its two SDK
+# siblings into wheels, and installs them with uv. Always a SOURCE build: the
+# orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0), so Node 22+
+# and pnpm are required to build the web UI unless you pass --skip-web-ui.
+#
+# It clones rather than `uv tool install git+...` on purpose — that path builds
+# an sdist, the sdist vendors no `web/`, and the SPA step then silently skips,
+# producing an API-only server that still exits 0.
+#
+# Env overrides:
+#   ORVEX_OMNIGENT_REF         git ref to install (default: orvex)
+#   ORVEX_OMNIGENT_REPO        git URL (default: git@github.com:orvexai/omnigent)
+#   ORVEX_OMNIGENT_PYTHON      python version for the tool venv (default: 3.12)
+#   ORVEX_OMNIGENT_EXTRAS      optional-dependency extras (comma-separated)
+#   ORVEX_OMNIGENT_SERVER      server URL printed in the next-steps host command
+#   ORVEX_OMNIGENT_SCRIPT_URL  self-bootstrap source (default: this URL)
+#
+# Examples:
+#   curl -fsSL orvex.sh/install/omnigent | bash                          # orvex branch
+#   ORVEX_OMNIGENT_REF=mcp curl -fsSL orvex.sh/install/omnigent | bash   # a feature branch
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --skip-web-ui      # no Node/pnpm needed
+#
+# Requires SSH access to git@github.com:orvexai/omnigent.
+
+set -euo pipefail
+
+REPO_URL="${ORVEX_OMNIGENT_REPO:-git@github.com:orvexai/omnigent}"
+GIT_REF="${ORVEX_OMNIGENT_REF:-orvex}"
+PYTHON_VERSION="${ORVEX_OMNIGENT_PYTHON:-3.12}"
+EXTRAS="${ORVEX_OMNIGENT_EXTRAS:-}"
+SERVER_URL="${ORVEX_OMNIGENT_SERVER:-}"
+NON_INTERACTIVE=false
+VERBOSE=false
+SKIP_WEB_UI=false
+
+# Pillow is NOT a declared dependency of omnigent — declaring it churned
+# thousands of lines of lockfile — but the runner needs it to bound browser
+# screenshots. Without it a capture returns an oversized payload that never
+# reaches the model, so inject it into the tool venv here.
+WITH_PACKAGES="pillow"
+
+# ── Self-bootstrap for interactive prompts under curl|bash ───────────────────
+# Bash reads the script from stdin lazily under curl|bash, so a mid-script
+# prompt would consume the script itself. Re-download to a temp file and
+# re-exec with /dev/tty. Skipped when the caller asked for --non-interactive
+# (nothing prompts) so CI and first-publish runs never depend on the URL
+# already being live.
+case " $* " in
+  *" --non-interactive "*) ;;
+  *)
+    if [ ! -t 0 ] && [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; then
+      command -v curl >/dev/null 2>&1 || {
+        echo "ERROR: curl required to self-bootstrap" >&2
+        exit 1
+      }
+      _SCRIPT_URL="${ORVEX_OMNIGENT_SCRIPT_URL:-https://orvex.sh/install/omnigent}"
+      _SCRIPT_TMP="$(mktemp -t orvex-omnigent.XXXXXX 2>/dev/null || mktemp)"
+      trap 'rm -f "$_SCRIPT_TMP"' EXIT
+      curl -fsSL "$_SCRIPT_URL" -o "$_SCRIPT_TMP" || {
+        echo "ERROR: download failed: $_SCRIPT_URL" >&2
+        exit 1
+      }
+      exec bash "$_SCRIPT_TMP" "$@" </dev/tty
+    fi
+    ;;
+esac
+
+# The checkout + wheels are built in a temp dir; drop it however we exit.
+WORK_DIR=""
+cleanup() { [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"; return 0; }
+trap cleanup EXIT
+
+# ── Style ────────────────────────────────────────────────────────────────────
+init_style() {
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$(printf '\033[1m') DIM=$(printf '\033[2m') RESET=$(printf '\033[0m')
+    GREEN=$(printf '\033[32m') YELLOW=$(printf '\033[33m')
+    MAGENTA=$(printf '\033[35m')
+  else
+    BOLD='' DIM='' RESET='' GREEN='' YELLOW='' MAGENTA=''
+  fi
+}
+
+step() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+verbose() { [ "$VERBOSE" = true ] && printf '%s  %s%s\n' "$DIM" "$*" "$RESET" || true; }
+
+usage() {
+  printf 'Usage: install/omnigent [--ref REF] [--repo URL] [--extra NAME]\n'
+  printf '                        [--skip-web-ui] [--non-interactive] [--verbose]\n'
+}
+
+print_banner() {
+  printf '\n%sOmnigent%s %s(orvex build)%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
+  printf '%s%s@%s%s\n\n' "$DIM" "$REPO_URL" "$GIT_REF" "$RESET"
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --non-interactive) NON_INTERACTIVE=true ;;
+      --verbose) VERBOSE=true ;;
+      --skip-web-ui) SKIP_WEB_UI=true ;;
+      # --version is accepted as an alias for --ref: the orvex build has no
+      # PyPI releases to pin, so a "version" here can only be a git ref.
+      --ref | --version)
+        [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+        GIT_REF="$2"; shift ;;
+      --repo)
+        [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+        REPO_URL="$2"; shift ;;
+      --extra)
+        [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+        if [ -n "$EXTRAS" ]; then EXTRAS="$EXTRAS,$2"; else EXTRAS="$2"; fi
+        shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage >&2; exit 1 ;;
+    esac
+    shift
+  done
+}
+
+# ── Prerequisites ────────────────────────────────────────────────────────────
+check_platform() {
+  case "$(uname -s)" in
+    Linux | Darwin) verbose "platform: $(uname -s) $(uname -m)" ;;
+    *) fail "Unsupported platform: $(uname -s). Omnigent supports Linux and macOS." ;;
+  esac
+}
+
+ensure_git() {
+  command -v git >/dev/null 2>&1 || fail "git is required. Install it and re-run."
+  verbose "git: $(git --version)"
+}
+
+ensure_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    verbose "uv: $(uv --version)"
+    return 0
+  fi
+  if [ "$NON_INTERACTIVE" != true ]; then
+    printf 'uv is required but not installed. Install it now? [Y/n] '
+    read -r reply </dev/tty || reply=y
+    case "$reply" in [nN]*) fail "uv is required. See https://docs.astral.sh/uv/" ;; esac
+  fi
+  step "Installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 ||
+    fail "uv install failed. See https://docs.astral.sh/uv/"
+  # The installer drops uv in ~/.local/bin, which may not be on PATH yet in
+  # this shell.
+  for candidate in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    [ -x "$candidate/uv" ] && PATH="$candidate:$PATH" && export PATH
+  done
+  command -v uv >/dev/null 2>&1 || fail "uv installed but not on PATH; open a new shell and re-run."
+}
+
+# The web UI is a pnpm workspace and setup.py shells out to pnpm during the
+# build, so BOTH are hard requirements here — unlike the upstream installer,
+# whose default is a prebuilt wheel and which therefore only warns.
+check_web_toolchain() {
+  if [ "$SKIP_WEB_UI" = true ]; then
+    warn "Skipping the web UI build (--skip-web-ui): 'omnigent server' will have no bundled UI."
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 ||
+    fail "Node 22+ is required to build the web UI. Install Node, or re-run with --skip-web-ui."
+  node_major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  if [ "${node_major:-0}" -lt 22 ]; then
+    fail "Node 22+ is required to build the web UI (found $(node --version)). Upgrade, or re-run with --skip-web-ui."
+  fi
+  verbose "node: $(node --version)"
+  # pnpm may come from its own binary or from corepack, which setup.py also
+  # accepts. Checking npm instead would pass here and fail mid-build.
+  if command -v pnpm >/dev/null 2>&1; then
+    verbose "pnpm: $(pnpm --version 2>/dev/null || echo present)"
+  elif command -v corepack >/dev/null 2>&1; then
+    verbose "pnpm: via corepack $(corepack --version)"
+  else
+    fail "pnpm is required to build the web UI (or corepack to supply it). Install pnpm, or re-run with --skip-web-ui."
+  fi
+}
+
+check_optional_deps() {
+  command -v tmux >/dev/null 2>&1 ||
+    warn "tmux not found — the Claude/Codex terminal launchers need it."
+  if [ "$(uname -s)" = "Linux" ] && ! command -v bwrap >/dev/null 2>&1; then
+    warn "bubblewrap (bwrap) not found — harness terminals will run unsandboxed."
+  fi
+}
+
+check_repo_access() {
+  case "$REPO_URL" in
+    git@* | ssh://*) ;;
+    *) return 0 ;;
+  esac
+  # A source install clones over SSH; failing here gives a clear cause instead
+  # of a uv build error thirty seconds in.
+  if ! git ls-remote --heads "$REPO_URL" >/dev/null 2>&1; then
+    fail "Cannot reach $REPO_URL over SSH. Check your GitHub SSH key and repo access."
+  fi
+  if ! git ls-remote --heads "$REPO_URL" "$GIT_REF" 2>/dev/null | grep -q .; then
+    # Not fatal: the ref may be a tag or a commit sha rather than a branch.
+    warn "Ref '$GIT_REF' is not a branch on $REPO_URL — continuing (it may be a tag or commit)."
+  fi
+  step "Repo access confirmed ($GIT_REF)"
+}
+
+# ── Install ──────────────────────────────────────────────────────────────────
+install_omnigent() {
+  extras_suffix=
+  [ -n "$EXTRAS" ] && extras_suffix="[$EXTRAS]"
+
+  # Deliberately NOT `uv tool install git+...`. That path builds an sdist
+  # first, the sdist vendors no `web/`, and setup.py then silently skips the
+  # SPA build — yielding an API-only server with no web UI and a zero exit.
+  # Building from a real checkout is what release-omnigent.yml does, and it is
+  # the only way the bundle actually lands.
+  WORK_DIR="$(mktemp -d -t orvex-omnigent.XXXXXX)"
+  src="$WORK_DIR/src"
+  dist="$WORK_DIR/dist"
+
+  step "Fetching $GIT_REF"
+  # --branch takes a branch or tag; a bare commit sha needs a second step.
+  if ! git clone --depth 1 --branch "$GIT_REF" --quiet "$REPO_URL" "$src" 2>/dev/null; then
+    git clone --quiet "$REPO_URL" "$src" || fail "Could not clone $REPO_URL"
+    git -C "$src" checkout --quiet "$GIT_REF" ||
+      fail "Ref '$GIT_REF' not found in $REPO_URL"
+  fi
+  verbose "checked out $(git -C "$src" rev-parse --short HEAD)"
+
+  if [ "$SKIP_WEB_UI" = true ]; then
+    export OMNIGENT_SKIP_WEB_UI=true
+    step "Building wheels (no web UI)"
+  else
+    step "Building wheels + web UI"
+    printf '   %sthe SPA build takes a few minutes%s\n' "$DIM" "$RESET"
+  fi
+
+  # The two SDK siblings are pinned `==` as path deps, so they must be built
+  # and offered alongside the app or the install cannot resolve them.
+  # --wheel is load-bearing, not a speed-up. Plain `uv build` makes the sdist
+  # from the source tree and then the wheel FROM THAT SDIST; the sdist carries
+  # neither `web/` nor a built bundle, so the SPA step never runs and the wheel
+  # ships without a UI. --wheel builds straight from the tree, where it does.
+  for pkg in "$src" "$src/sdks/python-client" "$src/sdks/ui"; do
+    verbose "building $(basename "$pkg")"
+    if [ "$VERBOSE" = true ]; then
+      uv build --wheel "$pkg" --out-dir "$dist" || fail "Build failed: $pkg"
+    else
+      uv build --wheel "$pkg" --out-dir "$dist" >/dev/null 2>&1 || fail "Build failed: $pkg"
+    fi
+  done
+
+  wheel="$(ls "$dist"/omnigent-*.whl 2>/dev/null | head -1)"
+  [ -n "$wheel" ] || fail "No omnigent wheel was produced."
+
+  # Extras cannot be appended to a wheel path; a PEP 508 direct reference is
+  # the form that carries them.
+  if [ -n "$extras_suffix" ]; then
+    target="omnigent${extras_suffix} @ file://$(cd "$(dirname "$wheel")" && pwd)/$(basename "$wheel")"
+  else
+    target="$wheel"
+  fi
+
+  step "Installing Omnigent${extras_suffix:+ $extras_suffix} (Python $PYTHON_VERSION)"
+  # --force so a re-run upgrades in place rather than no-op'ing.
+  uv tool install --force -q --python "$PYTHON_VERSION" \
+    --find-links "$dist" --with "$WITH_PACKAGES" "$target"
+}
+
+uv_tool_bin_dir() { uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin"; }
+
+path_contains() {
+  case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
+}
+
+verify_omnigent() {
+  bin_dir="$1"
+  cli_path="$bin_dir/omnigent"
+  [ -x "$cli_path" ] || cli_path="$(command -v omnigent 2>/dev/null || true)"
+  [ -n "$cli_path" ] || fail "Omnigent installed, but the omnigent command was not found."
+  "$cli_path" --help >/dev/null || fail "omnigent is installed but failed to run."
+  step "Verified $("$cli_path" --version 2>/dev/null | head -1)"
+
+  # Pillow is injected rather than declared, so prove it actually landed —
+  # otherwise screenshot bounding is silently inert.
+  tool_python="$(uv tool dir 2>/dev/null)/omnigent/bin/python"
+  if [ -x "$tool_python" ] && "$tool_python" -c "import PIL" >/dev/null 2>&1; then
+    verbose "pillow: present (browser screenshots will be bounded)"
+  else
+    warn "Pillow not detected in the tool venv — browser screenshots will not be size-bounded."
+  fi
+
+  # A build that quietly drops the SPA still installs and still exits 0, and
+  # the loss only shows up as an API-only page on first `omnigent server`.
+  # Fail here instead.
+  if [ "$SKIP_WEB_UI" != true ] && [ -x "$tool_python" ]; then
+    bundle="$("$tool_python" -c \
+      'import pathlib,omnigent;print(pathlib.Path(omnigent.__file__).parent/"server"/"static"/"web-ui"/"index.html")' \
+      2>/dev/null || true)"
+    if [ -n "$bundle" ] && [ -f "$bundle" ]; then
+      step "Web UI bundled"
+    else
+      fail "Installed, but the web UI bundle is missing — 'omnigent server' would serve an API-only page. Re-run with --verbose to see the build output, or --skip-web-ui to accept this."
+    fi
+  fi
+}
+
+maybe_add_bin_to_path() {
+  bin_dir="$1"
+  path_contains "$bin_dir" && return 0
+  warn "$bin_dir is not on your PATH."
+  printf '   Add it with:  %sexport PATH="%s:$PATH"%s\n' "$BOLD" "$bin_dir" "$RESET"
+}
+
+write_install_ledger() {
+  bin_dir="$1"
+  cli_path="$bin_dir/omnigent"
+  [ -x "$cli_path" ] || cli_path="$(command -v omnigent 2>/dev/null || true)"
+  [ -n "$cli_path" ] || return 0
+  if "$cli_path" _internal write-ledger --from-env >/dev/null 2>&1; then
+    step "Recorded install ledger"
+  else
+    verbose "install ledger not written (uninstall can backfill it later)"
+  fi
+}
+
+print_next_steps() {
+  bin_dir="$1"
+  prefix=
+  path_contains "$bin_dir" || prefix="PATH=\"$bin_dir:\$PATH\" "
+
+  printf '\n%sOmnigent installed.%s\n\n' "$BOLD" "$RESET"
+  printf 'Start chatting — first run sets up a model and a local web UI:\n'
+  printf '  %s%somnigent%s\n\n' "$prefix" "$MAGENTA" "$RESET"
+  printf 'Or launch a specific coding harness:\n'
+  printf '  %somnigent claude          # Claude Code\n' "$prefix"
+  printf '  %somnigent codex           # Codex\n\n' "$prefix"
+  printf 'Connect this machine to an Omnigent server as a host:\n'
+  if [ -n "$SERVER_URL" ]; then
+    printf '  %somnigent host --server %s\n\n' "$prefix" "$SERVER_URL"
+  else
+    printf '  %somnigent host --server https://your-omnigent-server/\n\n' "$prefix"
+  fi
+  printf 'Re-run this installer any time to upgrade in place:\n'
+  printf '  %sORVEX_OMNIGENT_REF=%s curl -fsSL orvex.sh/install/omnigent | bash%s\n' "$DIM" "$GIT_REF" "$RESET"
+}
+
+main() {
+  parse_args "$@"
+  init_style
+  print_banner
+  check_platform
+  ensure_git
+  ensure_uv
+  check_web_toolchain
+  check_optional_deps
+  check_repo_access
+  install_omnigent
+  bin_dir="$(uv_tool_bin_dir)"
+  verify_omnigent "$bin_dir"
+  maybe_add_bin_to_path "$bin_dir"
+  write_install_ledger "$bin_dir"
+  print_next_steps "$bin_dir"
+}
+
+main "$@"

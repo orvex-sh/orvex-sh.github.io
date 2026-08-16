@@ -23,6 +23,10 @@
   <h1>orvex.sh</h1>
   <p class="muted">Install endpoints for orvex AI tooling. Each script is a single bash file you can <code>curl … | bash</code> or download + inspect first.</p>
 
+  <h2>Omnigent (orvex build)</h2>
+  <pre><code>curl -fsSL orvex.sh/install/omnigent | bash</code></pre>
+  <p class="muted">Installs the orvex build of <a href="https://github.com/orvexai/omnigent"><code>orvexai/omnigent</code></a> with uv. Always a source build, so it needs Node ≥ 22 and pnpm for the web UI (<code>--skip-web-ui</code> drops both) plus SSH access to the orvexai GitHub org. Defaults to the <code>orvex</code> branch; set <code>ORVEX_OMNIGENT_REF</code> for another.</p>
+
   <h2>BMAD modules (Linear + Docmost)</h2>
   <pre><code>curl -fsSL orvex.sh/install/bmad | bash</code></pre>
   <p class="muted">Installs <a href="https://github.com/orvexai/bmad-modules"><code>orvexai/bmad-modules</code></a> into the current project, applies the Linear write-suppression patch, and stages override TOMLs. Requires Node ≥ 20.12 and SSH access to the orvexai GitHub org.</p>
