@@ -21,9 +21,13 @@
 #   ORVEX_OMNIGENT_SCRIPT_URL  self-bootstrap source (default: this URL)
 #
 # Examples:
-#   curl -fsSL orvex.sh/install/omnigent | bash                          # orvex branch
-#   ORVEX_OMNIGENT_REF=mcp curl -fsSL orvex.sh/install/omnigent | bash   # a feature branch
-#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --skip-web-ui      # no Node/pnpm needed
+#   curl -fsSL orvex.sh/install/omnigent | bash                       # orvex branch
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp       # a feature branch
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --skip-web-ui   # no Node/pnpm needed
+#
+# Note the env overrides must prefix `bash`, not `curl` — in `VAR=x curl … |
+# bash` the shell assigns VAR to curl only and the script never sees it:
+#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=mcp bash
 #
 # Requires SSH access to git@github.com:orvexai/omnigent.
 

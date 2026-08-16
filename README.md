@@ -14,10 +14,16 @@ curl -fsSL orvex.sh/install/omnigent | bash
 
 Always a source build — the orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0), so Node ≥ 22 and pnpm are required to build the web UI. Pass `--skip-web-ui` to install without it and drop both requirements. Also needs SSH access to `git@github.com:orvexai/omnigent`.
 
-Defaults to the `orvex` branch; override with `ORVEX_OMNIGENT_REF`:
+Defaults to the `orvex` branch; install another ref with `--ref`:
 
 ```bash
-ORVEX_OMNIGENT_REF=mcp curl -fsSL orvex.sh/install/omnigent | bash
+curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp
+```
+
+Env overrides work too, but must prefix `bash` rather than `curl` — in `VAR=x curl … | bash` the shell assigns the variable to `curl` alone and the script never sees it:
+
+```bash
+curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=mcp bash
 ```
 
 See [`install/omnigent`](install/omnigent) for the script and its full env-override list.
