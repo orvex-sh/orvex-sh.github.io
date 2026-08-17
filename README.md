@@ -16,19 +16,19 @@ Installs the **prebuilt wheels attached to a tagged release**, so it needs no No
 
 Releases are cut from **`mcp`** — that is where the agent / MCP work lands, and the release workflow refuses to build from any other branch. `orvex` is kept deliberately lean and lags those fixes.
 
-**Releases are numbered `orvex-vN`**, a serial this fork owns. The version in `pyproject.toml` belongs to upstream and shifts on every rebase, so it can't identify a build we control; the packages are instead stamped `<upstream base>+orvex.N` at build time, which records the upstream line while leaving the serial ours to increment.
+**The orvex line numbers its own releases**, tagged `orvex-vX.Y.Z`. The version in `pyproject.toml` belongs to upstream — it names the line we rebased onto, not any build we control, and it shifts on the next rebase. The tag carries the real version and the packages are stamped from it at build time. Releases are plain finals rather than upstream's `X.Y.Z.dev0`, since a `.dev` version is a PEP 440 pre-release that resolvers skip without `--pre`.
 
 Pin a different release, or build from a git ref instead (development — this is the path that needs Node ≥ 22, pnpm, and SSH access):
 
 ```bash
-curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 3
+curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 0.10.1
 curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp
 ```
 
 Env overrides work too, but must prefix `bash` rather than `curl` — in `VAR=x curl … | bash` the shell assigns the variable to `curl` alone and the script never sees it:
 
 ```bash
-curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_RELEASE=orvex-v3 bash
+curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_RELEASE=orvex-v0.10.1 bash
 ```
 
 See [`install/omnigent`](install/omnigent) for the script and its full env-override list.

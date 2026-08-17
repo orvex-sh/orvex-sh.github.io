@@ -15,7 +15,7 @@
 # the release workflow refuses to build from any other branch. `orvex` is kept
 # deliberately lean and lags those fixes.
 #
-#   --release N   install a specific release, e.g. `3` or `orvex-v3`
+#   --release X   install a specific release, e.g. `0.10.1` or `orvex-v0.10.1`
 #                 (default: the pinned release below)
 #   --ref REF     build from a git ref instead (development; needs Node 22+ and
 #                 pnpm, and takes minutes rather than seconds)
@@ -35,12 +35,12 @@
 #
 # Examples:
 #   curl -fsSL orvex.sh/install/omnigent | bash                          # pinned release
-#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 3        # another release
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 0.10.1   # another release
 #   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp          # build mcp HEAD
 #
 # Note the env overrides must prefix `bash`, not `curl` — in `VAR=x curl … |
 # bash` the shell assigns VAR to curl only and the script never sees it:
-#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_RELEASE=orvex-v3 bash
+#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_RELEASE=orvex-v0.10.1 bash
 #
 # Needs `gh` authenticated against orvexai (release assets are private); the
 # source path needs SSH access to git@github.com:orvexai/omnigent instead.
@@ -50,15 +50,15 @@ set -euo pipefail
 REPO_URL="${ORVEX_OMNIGENT_REPO:-git@github.com:orvexai/omnigent}"
 # GitHub repo the release assets are pulled from, in owner/name form.
 RELEASE_REPO="${ORVEX_OMNIGENT_RELEASE_REPO:-orvexai/omnigent}"
-# Release installed when none is requested. Bump this when a new orvex-vN
-# ships. Releases are numbered by an orvex serial rather than the version in
-# pyproject.toml: that number is upstream's, it moves under the fork on every
-# rebase, and pinning it would name a build this fork does not control. The
-# packages themselves are stamped `<upstream base>+orvex.N` at build time.
+# Release installed when none is requested. Bump this when a new one ships.
+# The orvex line numbers its own releases: the version in pyproject.toml is
+# upstream's, it names the line the fork rebased onto rather than any build the
+# fork controls, and it moves on the next rebase. Tags carry the real version,
+# and the packages are stamped from the tag at build time.
 # Pinned rather than resolved as "latest" on purpose: a draft release is
 # invisible to the latest-release API, so auto-resolution would skip the very
 # release a human is still reviewing.
-RELEASE="${ORVEX_OMNIGENT_RELEASE:-${ORVEX_OMNIGENT_VERSION:-orvex-v1}}"
+RELEASE="${ORVEX_OMNIGENT_RELEASE:-${ORVEX_OMNIGENT_VERSION:-orvex-v0.10.0}}"
 # Empty means install a release. Setting a ref switches to a source build.
 GIT_REF="${ORVEX_OMNIGENT_REF:-}"
 PYTHON_VERSION="${ORVEX_OMNIGENT_PYTHON:-3.12}"
@@ -122,20 +122,24 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 verbose() { [ "$VERBOSE" = true ] && printf '%s  %s%s\n' "$DIM" "$*" "$RESET" || true; }
 
 usage() {
-  printf 'Usage: install/omnigent [--release N] [--ref REF] [--repo URL]\n'
+  printf 'Usage: install/omnigent [--release X.Y.Z] [--ref REF] [--repo URL]\n'
   printf '                        [--extra NAME] [--skip-web-ui]\n'
   printf '                        [--non-interactive] [--verbose]\n'
 }
 
-# Releases are numbered orvex-vN, so accept a bare serial and reject anything
-# else here — a made-up tag would otherwise surface as an opaque 404 from gh.
+# Releases are tagged orvex-vX.Y.Z, so accept a bare or v-prefixed version and
+# reject anything else here — a made-up tag would otherwise surface as an
+# opaque 404 from gh. Finals only, matching what the release workflow accepts.
 normalize_release() {
-  if [[ "$1" =~ ^orvex-v[0-9]+$ ]]; then
-    printf '%s\n' "$1"
-  elif [[ "$1" =~ ^[0-9]+$ ]]; then
-    printf 'orvex-v%s\n' "$1"
+  case "$1" in
+    orvex-v*) candidate="${1#orvex-v}" ;;
+    v*) candidate="${1#v}" ;;
+    *) candidate="$1" ;;
+  esac
+  if [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'orvex-v%s\n' "$candidate"
   else
-    printf "ERROR: '%s' is not an orvex release. They are numbered orvex-vN — pass 3 or orvex-v3. List them with: gh release list --repo %s\n" \
+    printf "ERROR: '%s' is not an orvex release. They are tagged orvex-vX.Y.Z — pass 0.10.0 or orvex-v0.10.0. List them with: gh release list --repo %s\n" \
       "$1" "$RELEASE_REPO" >&2
     return 1
   fi

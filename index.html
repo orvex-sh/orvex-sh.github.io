@@ -25,7 +25,7 @@
 
   <h2>Omnigent (orvex build)</h2>
   <pre><code>curl -fsSL orvex.sh/install/omnigent | bash</code></pre>
-  <p class="muted">Installs the orvex build of <a href="https://github.com/orvexai/omnigent"><code>orvexai/omnigent</code></a> with uv, from the prebuilt wheels on a tagged release — no Node, no build, a few seconds. Needs <code>gh</code> logged in to the orvexai org, since the repo is private. Releases are cut from <code>mcp</code>, where the agent/MCP work lands; <code>orvex</code> is kept lean and lags it. Releases are numbered <code>orvex-vN</code>, a serial this fork owns — upstream's version moves on every rebase, so builds are stamped <code>&lt;upstream base&gt;+orvex.N</code>. Add <code>-s -- --release &lt;n&gt;</code> to pin one, or <code>-s -- --ref &lt;branch&gt;</code> to build from source instead.</p>
+  <p class="muted">Installs the orvex build of <a href="https://github.com/orvexai/omnigent"><code>orvexai/omnigent</code></a> with uv, from the prebuilt wheels on a tagged release — no Node, no build, a few seconds. Needs <code>gh</code> logged in to the orvexai org, since the repo is private. Releases are cut from <code>mcp</code>, where the agent/MCP work lands; <code>orvex</code> is kept lean and lags it. The orvex line numbers its own releases, tagged <code>orvex-vX.Y.Z</code> — upstream's version names the line we rebased onto and moves on the next rebase, so the tag carries the real one. Add <code>-s -- --release &lt;x.y.z&gt;</code> to pin one, or <code>-s -- --ref &lt;branch&gt;</code> to build from source instead.</p>
 
   <h2>BMAD modules (Linear + Docmost)</h2>
   <pre><code>curl -fsSL orvex.sh/install/bmad | bash</code></pre>
