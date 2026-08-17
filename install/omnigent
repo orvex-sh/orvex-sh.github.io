@@ -12,8 +12,12 @@
 # an sdist, the sdist vendors no `web/`, and the SPA step then silently skips,
 # producing an API-only server that still exits 0.
 #
+# Defaults to the `mcp` branch: that is where the agent / MCP work lands, so it
+# is the build a host connecting to an Omnigent server should run. `orvex` is
+# kept deliberately lean and lags those fixes — install it with `--ref orvex`.
+#
 # Env overrides:
-#   ORVEX_OMNIGENT_REF         git ref to install (default: orvex)
+#   ORVEX_OMNIGENT_REF         git ref to install (default: mcp)
 #   ORVEX_OMNIGENT_REPO        git URL (default: git@github.com:orvexai/omnigent)
 #   ORVEX_OMNIGENT_PYTHON      python version for the tool venv (default: 3.12)
 #   ORVEX_OMNIGENT_EXTRAS      optional-dependency extras (comma-separated)
@@ -21,20 +25,20 @@
 #   ORVEX_OMNIGENT_SCRIPT_URL  self-bootstrap source (default: this URL)
 #
 # Examples:
-#   curl -fsSL orvex.sh/install/omnigent | bash                       # orvex branch
-#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp       # a feature branch
+#   curl -fsSL orvex.sh/install/omnigent | bash                       # mcp branch
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref orvex     # the lean branch
 #   curl -fsSL orvex.sh/install/omnigent | bash -s -- --skip-web-ui   # no Node/pnpm needed
 #
 # Note the env overrides must prefix `bash`, not `curl` — in `VAR=x curl … |
 # bash` the shell assigns VAR to curl only and the script never sees it:
-#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=mcp bash
+#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=orvex bash
 #
 # Requires SSH access to git@github.com:orvexai/omnigent.
 
 set -euo pipefail
 
 REPO_URL="${ORVEX_OMNIGENT_REPO:-git@github.com:orvexai/omnigent}"
-GIT_REF="${ORVEX_OMNIGENT_REF:-orvex}"
+GIT_REF="${ORVEX_OMNIGENT_REF:-mcp}"
 PYTHON_VERSION="${ORVEX_OMNIGENT_PYTHON:-3.12}"
 EXTRAS="${ORVEX_OMNIGENT_EXTRAS:-}"
 SERVER_URL="${ORVEX_OMNIGENT_SERVER:-}"
@@ -353,7 +357,9 @@ print_next_steps() {
     printf '  %somnigent host --server https://your-omnigent-server/\n\n' "$prefix"
   fi
   printf 'Re-run this installer any time to upgrade in place:\n'
-  printf '  %sORVEX_OMNIGENT_REF=%s curl -fsSL orvex.sh/install/omnigent | bash%s\n' "$DIM" "$GIT_REF" "$RESET"
+  # `--ref`, never a `VAR=x curl … | bash` prefix: that assigns the variable to
+  # curl alone, so the reprinted ref would be silently ignored on re-run.
+  printf '  %scurl -fsSL orvex.sh/install/omnigent | bash -s -- --ref %s%s\n' "$DIM" "$GIT_REF" "$RESET"
 }
 
 main() {
