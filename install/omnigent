@@ -16,7 +16,7 @@
 # deliberately lean and lags those fixes.
 #
 #   --release X   install a specific release, e.g. `0.10.1` or `orvex-v0.10.1`
-#                 (default: the pinned release below)
+#                 (default: the newest published release)
 #   --ref REF     build from a git ref instead (development; needs Node 22+ and
 #                 pnpm, and takes minutes rather than seconds)
 #
@@ -25,7 +25,7 @@
 # then silently skips, producing an API-only server that still exits 0.
 #
 # Env overrides:
-#   ORVEX_OMNIGENT_RELEASE     release tag to install (default: pinned below)
+#   ORVEX_OMNIGENT_RELEASE     release tag to install (default: newest published)
 #   ORVEX_OMNIGENT_REF         git ref — setting it switches to a source build
 #   ORVEX_OMNIGENT_REPO        git URL (default: git@github.com:orvexai/omnigent)
 #   ORVEX_OMNIGENT_PYTHON      python version for the tool venv (default: 3.12)
@@ -34,7 +34,7 @@
 #   ORVEX_OMNIGENT_SCRIPT_URL  self-bootstrap source (default: this URL)
 #
 # Examples:
-#   curl -fsSL orvex.sh/install/omnigent | bash                          # pinned release
+#   curl -fsSL orvex.sh/install/omnigent | bash                          # newest release
 #   curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 0.10.1   # another release
 #   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp          # build mcp HEAD
 #
@@ -50,15 +50,16 @@ set -euo pipefail
 REPO_URL="${ORVEX_OMNIGENT_REPO:-git@github.com:orvexai/omnigent}"
 # GitHub repo the release assets are pulled from, in owner/name form.
 RELEASE_REPO="${ORVEX_OMNIGENT_RELEASE_REPO:-orvexai/omnigent}"
-# Release installed when none is requested. Bump this when a new one ships.
+# Release to install. Empty resolves the newest PUBLISHED one at run time, so
+# no version is hardcoded here and cutting a release needs no edit to this file.
 # The orvex line numbers its own releases: the version in pyproject.toml is
 # upstream's, it names the line the fork rebased onto rather than any build the
 # fork controls, and it moves on the next rebase. Tags carry the real version,
 # and the packages are stamped from the tag at build time.
-# Pinned rather than resolved as "latest" on purpose: a draft release is
-# invisible to the latest-release API, so auto-resolution would skip the very
-# release a human is still reviewing.
-RELEASE="${ORVEX_OMNIGENT_RELEASE:-${ORVEX_OMNIGENT_VERSION:-orvex-v0.10.0}}"
+# Resolving only PUBLISHED releases is what makes the workflow's draft step a
+# real gate: a freshly tagged build stays invisible to installers until a human
+# publishes it, and until then this keeps serving the last reviewed release.
+RELEASE="${ORVEX_OMNIGENT_RELEASE:-${ORVEX_OMNIGENT_VERSION:-}}"
 # Empty means install a release. Setting a ref switches to a source build.
 GIT_REF="${ORVEX_OMNIGENT_REF:-}"
 PYTHON_VERSION="${ORVEX_OMNIGENT_PYTHON:-3.12}"
@@ -145,6 +146,24 @@ normalize_release() {
   fi
 }
 
+# Newest published orvex-vX.Y.Z, chosen by version order rather than by
+# publish date: a backport published after a newer line would otherwise win.
+# Drafts and prereleases are excluded, so an unreviewed build never installs.
+resolve_latest_release() {
+  releases="$(gh release list --repo "$RELEASE_REPO" --limit 100 \
+    --json tagName,isDraft,isPrerelease \
+    --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+    2>/dev/null)" || releases=""
+  # grep exits non-zero on no match, which pipefail would turn into an abort.
+  latest="$(printf '%s\n' "$releases" \
+    | grep -E '^orvex-v[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sed 's/^orvex-v//' | sort -V | tail -1)" || latest=""
+  if [ -z "$latest" ]; then
+    fail "No published orvex release found in $RELEASE_REPO. Check 'gh release list --repo $RELEASE_REPO' (a draft is not installable until published), pin one with --release X.Y.Z, or build from source with --ref mcp."
+  fi
+  printf 'orvex-v%s\n' "$latest"
+}
+
 # A ref (or an explicit --from-source) selects the source build; otherwise a
 # released wheel is installed.
 building_from_source() { [ -n "$GIT_REF" ]; }
@@ -154,7 +173,8 @@ print_banner() {
   if building_from_source; then
     printf '%s%s@%s (source build)%s\n\n' "$DIM" "$REPO_URL" "$GIT_REF" "$RESET"
   else
-    printf '%srelease %s from %s%s\n\n' "$DIM" "$RELEASE" "$RELEASE_REPO" "$RESET"
+    printf '%srelease %s from %s%s\n\n' \
+      "$DIM" "${RELEASE:-latest}" "$RELEASE_REPO" "$RESET"
   fi
 }
 
@@ -298,6 +318,13 @@ install_omnigent() {
 install_from_release() {
   extras_suffix=
   [ -n "$EXTRAS" ] && extras_suffix="[$EXTRAS]"
+
+  # Resolved here, not at startup: it needs gh authenticated, which main()
+  # only guarantees once it knows this is the release path.
+  if [ -z "$RELEASE" ]; then
+    RELEASE="$(resolve_latest_release)"
+    verbose "resolved latest published release: $RELEASE"
+  fi
 
   WORK_DIR="$(mktemp -d -t orvex-omnigent.XXXXXX)"
   dist="$WORK_DIR/dist"
@@ -478,7 +505,10 @@ print_next_steps() {
 
 main() {
   parse_args "$@"
-  RELEASE="$(normalize_release "$RELEASE")" || exit 1
+  # Empty is the "resolve latest" sentinel, so only validate a supplied value.
+  if [ -n "$RELEASE" ]; then
+    RELEASE="$(normalize_release "$RELEASE")" || exit 1
+  fi
   init_style
   print_banner
   check_platform

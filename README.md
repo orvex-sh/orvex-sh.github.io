@@ -18,7 +18,9 @@ Releases are cut from **`mcp`** — that is where the agent / MCP work lands, an
 
 **The orvex line numbers its own releases**, tagged `orvex-vX.Y.Z`. The version in `pyproject.toml` belongs to upstream — it names the line we rebased onto, not any build we control, and it shifts on the next rebase. The tag carries the real version and the packages are stamped from it at build time. Releases are plain finals rather than upstream's `X.Y.Z.dev0`, since a `.dev` version is a PEP 440 pre-release that resolvers skip without `--pre`.
 
-Pin a different release, or build from a git ref instead (development — this is the path that needs Node ≥ 22, pnpm, and SSH access):
+With no flags the installer resolves the **newest published** release, so nothing here needs editing when one is cut. Only published releases count: the release workflow opens each one as a draft, and a draft stays invisible to installers until a human publishes it — until then this keeps serving the last reviewed release.
+
+Pin a specific release, or build from a git ref instead (development — this is the path that needs Node ≥ 22, pnpm, and SSH access):
 
 ```bash
 curl -fsSL orvex.sh/install/omnigent | bash -s -- --release 0.10.1
