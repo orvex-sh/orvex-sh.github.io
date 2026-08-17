@@ -3,21 +3,29 @@
 #
 #   curl -fsSL orvex.sh/install/omnigent | bash
 #
-# Clones the private orvexai/omnigent repo, builds the app + its two SDK
-# siblings into wheels, and installs them with uv. Always a SOURCE build: the
-# orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0), so Node 22+
-# and pnpm are required to build the web UI unless you pass --skip-web-ui.
+# Installs the prebuilt wheels attached to a tagged GitHub release with uv,
+# wires up PATH, and records an install ledger — the same shape as omnigent's
+# own scripts/install_oss.sh, which installs a published wheel from PyPI. The
+# orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0) and the repo
+# is private, so the release assets stand in for the index and `gh` supplies
+# the authentication. The wheel bundles the prebuilt web UI, so the default
+# install needs no Node, no pnpm, and runs no build.
 #
-# It clones rather than `uv tool install git+...` on purpose — that path builds
-# an sdist, the sdist vendors no `web/`, and the SPA step then silently skips,
-# producing an API-only server that still exits 0.
+# Releases are cut from `mcp`: that is where the agent / MCP work lands, and
+# the release workflow refuses to build from any other branch. `orvex` is kept
+# deliberately lean and lags those fixes.
 #
-# Defaults to the `mcp` branch: that is where the agent / MCP work lands, so it
-# is the build a host connecting to an Omnigent server should run. `orvex` is
-# kept deliberately lean and lags those fixes — install it with `--ref orvex`.
+#   --version X   install a specific release (default: the pinned version)
+#   --ref REF     build from a git ref instead (development; needs Node 22+ and
+#                 pnpm, and takes minutes rather than seconds)
+#
+# The source path clones and builds rather than `uv tool install git+...` on
+# purpose — that builds an sdist, the sdist vendors no `web/`, and the SPA step
+# then silently skips, producing an API-only server that still exits 0.
 #
 # Env overrides:
-#   ORVEX_OMNIGENT_REF         git ref to install (default: mcp)
+#   ORVEX_OMNIGENT_VERSION     release version to install (default: pinned below)
+#   ORVEX_OMNIGENT_REF         git ref — setting it switches to a source build
 #   ORVEX_OMNIGENT_REPO        git URL (default: git@github.com:orvexai/omnigent)
 #   ORVEX_OMNIGENT_PYTHON      python version for the tool venv (default: 3.12)
 #   ORVEX_OMNIGENT_EXTRAS      optional-dependency extras (comma-separated)
@@ -25,20 +33,29 @@
 #   ORVEX_OMNIGENT_SCRIPT_URL  self-bootstrap source (default: this URL)
 #
 # Examples:
-#   curl -fsSL orvex.sh/install/omnigent | bash                       # mcp branch
-#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref orvex     # the lean branch
-#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --skip-web-ui   # no Node/pnpm needed
+#   curl -fsSL orvex.sh/install/omnigent | bash                          # pinned release
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --version 0.11.0   # another release
+#   curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp          # build mcp HEAD
 #
 # Note the env overrides must prefix `bash`, not `curl` — in `VAR=x curl … |
 # bash` the shell assigns VAR to curl only and the script never sees it:
-#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=orvex bash
+#   curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_VERSION=0.11.0 bash
 #
-# Requires SSH access to git@github.com:orvexai/omnigent.
+# Needs `gh` authenticated against orvexai (release assets are private); the
+# source path needs SSH access to git@github.com:orvexai/omnigent instead.
 
 set -euo pipefail
 
 REPO_URL="${ORVEX_OMNIGENT_REPO:-git@github.com:orvexai/omnigent}"
-GIT_REF="${ORVEX_OMNIGENT_REF:-mcp}"
+# GitHub repo the release assets are pulled from, in owner/name form.
+RELEASE_REPO="${ORVEX_OMNIGENT_RELEASE_REPO:-orvexai/omnigent}"
+# Release installed when none is requested. Bump this when a new tag ships.
+# Pinned rather than resolved as "latest" on purpose: a draft release is
+# invisible to the latest-release API, so resolving it would skip the very
+# release a human is still checking.
+VERSION="${ORVEX_OMNIGENT_VERSION:-0.10.0.dev0}"
+# Empty means install a release. Setting a ref switches to a source build.
+GIT_REF="${ORVEX_OMNIGENT_REF:-}"
 PYTHON_VERSION="${ORVEX_OMNIGENT_PYTHON:-3.12}"
 EXTRAS="${ORVEX_OMNIGENT_EXTRAS:-}"
 SERVER_URL="${ORVEX_OMNIGENT_SERVER:-}"
@@ -100,13 +117,22 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 verbose() { [ "$VERBOSE" = true ] && printf '%s  %s%s\n' "$DIM" "$*" "$RESET" || true; }
 
 usage() {
-  printf 'Usage: install/omnigent [--ref REF] [--repo URL] [--extra NAME]\n'
-  printf '                        [--skip-web-ui] [--non-interactive] [--verbose]\n'
+  printf 'Usage: install/omnigent [--version X] [--ref REF] [--repo URL]\n'
+  printf '                        [--extra NAME] [--skip-web-ui]\n'
+  printf '                        [--non-interactive] [--verbose]\n'
 }
+
+# A ref (or an explicit --from-source) selects the source build; otherwise a
+# released wheel is installed.
+building_from_source() { [ -n "$GIT_REF" ]; }
 
 print_banner() {
   printf '\n%sOmnigent%s %s(orvex build)%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
-  printf '%s%s@%s%s\n\n' "$DIM" "$REPO_URL" "$GIT_REF" "$RESET"
+  if building_from_source; then
+    printf '%s%s@%s (source build)%s\n\n' "$DIM" "$REPO_URL" "$GIT_REF" "$RESET"
+  else
+    printf '%srelease v%s from %s%s\n\n' "$DIM" "$VERSION" "$RELEASE_REPO" "$RESET"
+  fi
 }
 
 parse_args() {
@@ -115,9 +141,11 @@ parse_args() {
       --non-interactive) NON_INTERACTIVE=true ;;
       --verbose) VERBOSE=true ;;
       --skip-web-ui) SKIP_WEB_UI=true ;;
-      # --version is accepted as an alias for --ref: the orvex build has no
-      # PyPI releases to pin, so a "version" here can only be a git ref.
-      --ref | --version)
+      --version)
+        [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+        # Tolerate a leading v so `--version v0.10.0` and the tag agree.
+        VERSION="${2#v}"; shift ;;
+      --ref)
         [ "$#" -ge 2 ] || { usage >&2; exit 1; }
         GIT_REF="$2"; shift ;;
       --repo)
@@ -168,10 +196,21 @@ ensure_uv() {
   command -v uv >/dev/null 2>&1 || fail "uv installed but not on PATH; open a new shell and re-run."
 }
 
+# Release assets live in a private repo, so fetching them needs an
+# authenticated client. gh is the one most people in the org already have.
+ensure_gh() {
+  command -v gh >/dev/null 2>&1 ||
+    fail "gh is required to download the release (the repo is private). Install GitHub CLI, or build from source with --ref mcp."
+  gh auth status >/dev/null 2>&1 ||
+    fail "gh is installed but not authenticated. Run 'gh auth login', or build from source with --ref mcp."
+  verbose "gh: $(gh --version | head -1)"
+}
+
 # The web UI is a pnpm workspace and setup.py shells out to pnpm during the
-# build, so BOTH are hard requirements here — unlike the upstream installer,
-# whose default is a prebuilt wheel and which therefore only warns.
+# build, so BOTH are hard requirements on the SOURCE path. The released wheel
+# ships the bundle prebuilt, which is why the default install needs neither.
 check_web_toolchain() {
+  building_from_source || return 0
   if [ "$SKIP_WEB_UI" = true ]; then
     warn "Skipping the web UI build (--skip-web-ui): 'omnigent server' will have no bundled UI."
     return 0
@@ -203,6 +242,7 @@ check_optional_deps() {
 }
 
 check_repo_access() {
+  building_from_source || return 0
   case "$REPO_URL" in
     git@* | ssh://*) ;;
     *) return 0 ;;
@@ -221,6 +261,59 @@ check_repo_access() {
 
 # ── Install ──────────────────────────────────────────────────────────────────
 install_omnigent() {
+  if building_from_source; then
+    install_from_source
+  else
+    install_from_release
+  fi
+}
+
+# The published-wheel path: no clone, no build, no Node — the same shape as
+# omnigent's own installer pulling a version from PyPI.
+install_from_release() {
+  extras_suffix=
+  [ -n "$EXTRAS" ] && extras_suffix="[$EXTRAS]"
+
+  WORK_DIR="$(mktemp -d -t orvex-omnigent.XXXXXX)"
+  dist="$WORK_DIR/dist"
+  mkdir -p "$dist"
+
+  step "Downloading omnigent $VERSION"
+  # The two SDK siblings are pinned `==`, so every wheel in the release is
+  # needed for the app wheel to resolve offline from --find-links.
+  if ! gh release download "v$VERSION" --repo "$RELEASE_REPO" \
+    --pattern '*.whl' --dir "$dist" >/dev/null 2>&1; then
+    fail "Could not download release v$VERSION from $RELEASE_REPO. Check 'gh release list --repo $RELEASE_REPO', or build from source with --ref mcp."
+  fi
+  verbose "$(ls "$dist" | tr '\n' ' ')"
+
+  wheel="$(ls "$dist"/omnigent-*.whl 2>/dev/null | head -1)"
+  [ -n "$wheel" ] || fail "Release v$VERSION carries no omnigent wheel."
+
+  install_wheel "$wheel" "$dist" "$extras_suffix"
+}
+
+# Shared tail of both paths: the wheel is already built either way.
+install_wheel() {
+  wheel="$1"
+  dist="$2"
+  extras_suffix="$3"
+
+  # Extras cannot be appended to a wheel path; a PEP 508 direct reference is
+  # the form that carries them.
+  if [ -n "$extras_suffix" ]; then
+    target="omnigent${extras_suffix} @ file://$(cd "$(dirname "$wheel")" && pwd)/$(basename "$wheel")"
+  else
+    target="$wheel"
+  fi
+
+  step "Installing Omnigent${extras_suffix:+ $extras_suffix} (Python $PYTHON_VERSION)"
+  # --force so a re-run upgrades in place rather than no-op'ing.
+  uv tool install --force -q --python "$PYTHON_VERSION" \
+    --find-links "$dist" --with "$WITH_PACKAGES" "$target"
+}
+
+install_from_source() {
   extras_suffix=
   [ -n "$EXTRAS" ] && extras_suffix="[$EXTRAS]"
 
@@ -268,18 +361,7 @@ install_omnigent() {
   wheel="$(ls "$dist"/omnigent-*.whl 2>/dev/null | head -1)"
   [ -n "$wheel" ] || fail "No omnigent wheel was produced."
 
-  # Extras cannot be appended to a wheel path; a PEP 508 direct reference is
-  # the form that carries them.
-  if [ -n "$extras_suffix" ]; then
-    target="omnigent${extras_suffix} @ file://$(cd "$(dirname "$wheel")" && pwd)/$(basename "$wheel")"
-  else
-    target="$wheel"
-  fi
-
-  step "Installing Omnigent${extras_suffix:+ $extras_suffix} (Python $PYTHON_VERSION)"
-  # --force so a re-run upgrades in place rather than no-op'ing.
-  uv tool install --force -q --python "$PYTHON_VERSION" \
-    --find-links "$dist" --with "$WITH_PACKAGES" "$target"
+  install_wheel "$wheel" "$dist" "$extras_suffix"
 }
 
 uv_tool_bin_dir() { uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin"; }
@@ -305,10 +387,13 @@ verify_omnigent() {
     warn "Pillow not detected in the tool venv — browser screenshots will not be size-bounded."
   fi
 
-  # A build that quietly drops the SPA still installs and still exits 0, and
+  # A wheel that quietly lacks the SPA still installs and still exits 0, and
   # the loss only shows up as an API-only page on first `omnigent server`.
-  # Fail here instead.
-  if [ "$SKIP_WEB_UI" != true ] && [ -x "$tool_python" ]; then
+  # Fail here instead. --skip-web-ui only excuses it on the source path; a
+  # release wheel is expected to carry the bundle however it was requested.
+  if { building_from_source && [ "$SKIP_WEB_UI" = true ]; }; then
+    :
+  elif [ -x "$tool_python" ]; then
     bundle="$("$tool_python" -c \
       'import pathlib,omnigent;print(pathlib.Path(omnigent.__file__).parent/"server"/"static"/"web-ui"/"index.html")' \
       2>/dev/null || true)"
@@ -357,9 +442,13 @@ print_next_steps() {
     printf '  %somnigent host --server https://your-omnigent-server/\n\n' "$prefix"
   fi
   printf 'Re-run this installer any time to upgrade in place:\n'
-  # `--ref`, never a `VAR=x curl … | bash` prefix: that assigns the variable to
-  # curl alone, so the reprinted ref would be silently ignored on re-run.
-  printf '  %scurl -fsSL orvex.sh/install/omnigent | bash -s -- --ref %s%s\n' "$DIM" "$GIT_REF" "$RESET"
+  # Flags, never a `VAR=x curl … | bash` prefix: that assigns the variable to
+  # curl alone, so the reprinted value would be silently ignored on re-run.
+  if building_from_source; then
+    printf '  %scurl -fsSL orvex.sh/install/omnigent | bash -s -- --ref %s%s\n' "$DIM" "$GIT_REF" "$RESET"
+  else
+    printf '  %scurl -fsSL orvex.sh/install/omnigent | bash%s\n' "$DIM" "$RESET"
+  fi
 }
 
 main() {
@@ -367,8 +456,14 @@ main() {
   init_style
   print_banner
   check_platform
-  ensure_git
   ensure_uv
+  # git is only needed to clone, gh only to fetch release assets — each path
+  # requires exactly one of them.
+  if building_from_source; then
+    ensure_git
+  else
+    ensure_gh
+  fi
   check_web_toolchain
   check_optional_deps
   check_repo_access

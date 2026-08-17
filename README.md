@@ -6,24 +6,27 @@ Tiny landing page served at <https://orvex.sh/>. Hosts orvex install endpoints.
 
 ### Omnigent (orvex build)
 
-Installs the orvex build of Omnigent from `orvexai/omnigent` with uv, wires up PATH, and records an install ledger.
+Installs the orvex build of Omnigent with uv, wires up PATH, and records an install ledger — the same shape as omnigent's own `scripts/install_oss.sh`.
 
 ```bash
 curl -fsSL orvex.sh/install/omnigent | bash
 ```
 
-Always a source build — the orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0), so Node ≥ 22 and pnpm are required to build the web UI. Pass `--skip-web-ui` to install without it and drop both requirements. Also needs SSH access to `git@github.com:orvexai/omnigent`.
+Installs the **prebuilt wheels attached to a tagged release**, so it needs no Node, no pnpm, and runs no build — a few seconds rather than a few minutes. The orvex line is not on PyPI (PyPI's `omnigent` is upstream 0.9.0) and the repo is private, so the release assets stand in for the package index and `gh` supplies the authentication: you need GitHub CLI logged in to `orvexai`.
 
-Defaults to the **`mcp`** branch — that is where the agent / MCP work lands, so it is the build a host connecting to an Omnigent server should run. `orvex` is kept deliberately lean and lags those fixes. Install another ref with `--ref`:
+Releases are cut from **`mcp`** — that is where the agent / MCP work lands, and the release workflow refuses to build from any other branch. `orvex` is kept deliberately lean and lags those fixes.
+
+Pin a different release, or build from a git ref instead (development — this is the path that needs Node ≥ 22, pnpm, and SSH access):
 
 ```bash
-curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref orvex
+curl -fsSL orvex.sh/install/omnigent | bash -s -- --version 0.11.0
+curl -fsSL orvex.sh/install/omnigent | bash -s -- --ref mcp
 ```
 
 Env overrides work too, but must prefix `bash` rather than `curl` — in `VAR=x curl … | bash` the shell assigns the variable to `curl` alone and the script never sees it:
 
 ```bash
-curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_REF=orvex bash
+curl -fsSL orvex.sh/install/omnigent | ORVEX_OMNIGENT_VERSION=0.11.0 bash
 ```
 
 See [`install/omnigent`](install/omnigent) for the script and its full env-override list.
