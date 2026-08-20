@@ -198,7 +198,7 @@ npx --yes "$BMAD_PKG" install \
   --directory . \
   --modules "$MODULES" \
   --custom-source "$SOURCES" \
-  2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lnr|doc)|lnr/module-help\.csv header does not match' >&2)
+  2> >(grep -vE '^\[warn\] (collectAgentsFromModuleYaml|writeCentralConfig).*module\.yaml.*(lin|doc)|lin/module-help\.csv header does not match' >&2)
 NPX_RC=$?
 set -e
 
@@ -225,11 +225,11 @@ fi
 # the reset failure mode the requested modules go missing too, so requiring
 # their presence catches it without the false positive.
 if [ -n "$MANIFEST_BAK" ]; then
-  # core is implicit; MODULES is what went to --modules; lnr/doc arrive via
+  # core is implicit; MODULES is what went to --modules; lin/doc arrive via
   # --custom-source and are non-toggleable in this installer.
   MISSING=""
   _OLD_IFS="$IFS"; IFS=,
-  for _m in core $MODULES lnr doc; do
+  for _m in core $MODULES lin doc; do
     [ -n "$_m" ] || continue
     grep -q "^  - name: $_m\$" "$MANIFEST" 2>/dev/null \
       || MISSING="${MISSING:+$MISSING, }$_m"
@@ -259,8 +259,8 @@ fi
 
 # ── Ensure orvex module content is fresh ─────────────────────────────────────
 # On an existing install, bmad-method's "Quick Update" path can decide there is
-# "no source available" for custom modules and SKIP lnr/doc entirely — even
-# though --custom-source was passed — leaving _bmad/lnr/ and _bmad/doc/
+# "no source available" for custom modules and SKIP lin/doc entirely — even
+# though --custom-source was passed — leaving _bmad/lin/ and _bmad/doc/
 # (bin/, data/, overrides/, skills/, commands/) pinned to whatever an earlier
 # install copied. That silently starves apply-patch.sh of new patch content:
 # patch sets are version-neutral (one flat bin/patches/ tracking current
@@ -275,7 +275,7 @@ fi
 # Must run BEFORE apply-patch.sh, which depends on a fresh bin/patches/.
 # Skill/command names and module dirs are disjoint across orvex modules — safe
 # to refresh. Best-effort: a clone failure leaves whatever bmad-method installed.
-declare -A _MOD_CODE=( [bmad-linear]=lnr [bmad-docmost]=doc )
+declare -A _MOD_CODE=( [bmad-linear]=lin [bmad-docmost]=doc )
 _SK_SRC="$(mktemp -d 2>/dev/null)"
 if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; then
   _MOD_N=0
@@ -294,7 +294,7 @@ if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; 
       done < <(find "$_SK_SRC/$_mod/$_sub" -type f -print0)
     done
   done
-  [ "$_MOD_N" -gt 0 ] && printf "  ${D}synced %s module file(s) → _bmad/{lnr,doc}/{bin,data,overrides}/${R}\n" "$_MOD_N"
+  [ "$_MOD_N" -gt 0 ] && printf "  ${D}synced %s module file(s) → _bmad/{lin,doc}/{bin,data,overrides}/${R}\n" "$_MOD_N"
 
   # Patch sets used to be tiered per bmm minor (patches/<MAJOR.MINOR>/*.patch);
   # they are now version-neutral and live flat in patches/. The sync above only
@@ -303,7 +303,7 @@ if [ -n "$_SK_SRC" ] && git clone --depth 1 "$REPO" "$_SK_SRC" >/dev/null 2>&1; 
   # reader would reasonably mistake for the live patch set. Prune exactly those:
   # numeric-named subdirs of the two patches roots, nothing else.
   _STALE_N=0
-  for _pr in _bmad/lnr/bin/patches _bmad/doc/data/patches; do
+  for _pr in _bmad/lin/bin/patches _bmad/doc/data/patches; do
     [ -d "$_pr" ] || continue
     for _vd in "$_pr"/*/; do
       [ -d "$_vd" ] || continue
@@ -352,47 +352,38 @@ fi
 [ -n "$_SK_SRC" ] && rm -rf "$_SK_SRC"
 
 # ── Patch (idempotent — quiet on success) ────────────────────────────────────
-if [ -f "_bmad/lnr/bin/apply-patch.sh" ]; then
+# The write-suppression patch engine belongs to bmad-houston, which is paused
+# while its binary is unavailable. bmad-linear needs no patching at all:
+# upstream's sprint-status sync skips itself when sprint-status.yaml is absent,
+# so a Linear-backed project gets local write suppression for free. Absence is
+# therefore the normal case and must not fail the install.
+if [ -f "_bmad/hou/bin/apply-patch.sh" ]; then
   printf "\n"
-  bash _bmad/lnr/bin/apply-patch.sh
-else
-  fail "_bmad/lnr/bin/apply-patch.sh not found — install incomplete?"
+  bash _bmad/hou/bin/apply-patch.sh
 fi
 
 # ── Overrides (merge-aware) ──────────────────────────────────────────────────
-# bmad-create-story.toml is contributed by BOTH lnr and doc → a blanket copy
+# bmad-create-story.toml is contributed by BOTH lin and doc → a blanket copy
 # would clobber one module's keys (Linear's tracking_system/adapter OR the
 # wiki-first facts). The docmost override is purely additive
-# ([workflow].persistent_facts), so UNION its items into lnr's copy instead of
-# overwriting it. lnr's own file is always a fresh straight copy (never
+# ([workflow].persistent_facts), so UNION its items into lin's copy instead of
+# overwriting it. lin's own file is always a fresh straight copy (never
 # conditioned on whether dest already exists) so re-running this script never
 # re-merges doc's facts on top of a dest that already has them from a prior
 # run — that accumulation bug produced triplicated persistent_facts entries
 # after repeated installs/updates. All other overrides copy straight across
 # every run (they target disjoint skills, so a plain overwrite is idempotent).
+# Each module now ships its own merge-aware installer, so this no longer
+# hand-rolls the merge. That matters: the resolver reads ONE team file per
+# skill, so a blanket `cp` silently discards whatever another module — or the
+# user — had already put there. The module scripts merge recursively, merge
+# keyed arrays by code/id, PRESERVE existing values on conflict with a named
+# warning, and are safe to re-run. The old awk union of persistent_facts is
+# gone with them; it existed only because nothing else knew how to merge.
 mkdir -p _bmad/custom
-DOC_CREATE_STORY="_bmad/doc/overrides/bmad-create-story.toml"
-for src in _bmad/lnr/overrides/*.toml _bmad/doc/overrides/*.toml; do
-  [ -e "$src" ] || continue
-  [ "$src" = "$DOC_CREATE_STORY" ] && continue
-  dest="_bmad/custom/$(basename "$src")"
-  cp "$src" "$dest"
+for _ovr in _bmad/lin/bin/install-overrides.sh _bmad/doc/bin/install-overrides.sh; do
+  [ -f "$_ovr" ] && bash "$_ovr"
 done
-if [ -e "$DOC_CREATE_STORY" ]; then
-  dest="_bmad/custom/bmad-create-story.toml"
-  [ -e "$dest" ] || cp "_bmad/lnr/overrides/bmad-create-story.toml" "$dest"
-  # Strip full-line comments first so an example array inside a header comment
-  # can't confuse extraction; capture only the real persistent_facts items.
-  add="$(grep -v '^[[:space:]]*#' "$DOC_CREATE_STORY" \
-         | awk '/persistent_facts[[:space:]]*=[[:space:]]*\[/{f=1;next} f&&/^[[:space:]]*\]/{f=0} f')"
-  if [ -n "$add" ]; then
-    awk -v add="$add" '
-      $0 !~ /^[[:space:]]*#/ && /persistent_facts[[:space:]]*=[[:space:]]*\[/ {pf=1}
-      pf && /^[[:space:]]*\]/ && !done {print add; done=1; pf=0}
-      {print}
-    ' "$dest" > "$dest.tmp" && mv "$dest.tmp" "$dest"
-  fi
-fi
 
 # ── Docmost bootstrap via docmost-cli ──────────────────────────────────────────
 # Resolves docmost_space (slug from space name) + docmost_default_owner_id
@@ -476,4 +467,5 @@ TOML
 COUNT="$(ls _bmad/custom/*.toml 2>/dev/null | wc -l | tr -d ' ')"
 printf "\n${G}✓ orvex BMAD modules installed${R}  ${D}(%s files in _bmad/custom/)${R}\n" "$COUNT"
 printf "  ${D}commit:${R}  ${B}git add _bmad/custom && git commit -m 'chore(bmad): orvex modules'${R}\n"
-printf "  ${D}upgrade:${R} ${B}_bmad/lnr/bin/apply-patch.sh${R} ${D}after every upstream Quick Update${R}\n\n"
+printf "  ${D}re-stage:${R} ${B}_bmad/lin/bin/install-overrides.sh${R} ${D}after every upstream Quick Update${R}\n"
+printf "  ${D}next:${R}    ${B}linearis auth login${R} ${D}then${R} ${B}_bmad/lin/tools/linear-sync.sh sync${R} ${D}— reads are cache-first, so an unsynced project has nothing to read${R}\n\n"
