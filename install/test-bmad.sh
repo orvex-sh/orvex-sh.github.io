@@ -413,4 +413,98 @@ fi
 assert_failure_cleanup
 echo '   PASS'
 
+# A19 stubs. The curl wrapper answers any github.com URL with 404 without
+# touching the network; every other URL is delegated to the real curl, so the
+# local-server tests are unaffected by being run through it.
+GH_LOG="$TEST_ROOT/gh.log"
+GH_BIN="$TEST_ROOT/gh-bin"
+NOGH_BIN="$TEST_ROOT/nogh-bin"
+mkdir -p "$GH_BIN" "$NOGH_BIN"
+export ORVEX_TEST_REAL_CURL="$(command -v curl)"
+export ORVEX_TEST_GH_LOG="$GH_LOG"
+export ORVEX_TEST_RELEASE_ROOT="$RELEASE_ROOT"
+export ORVEX_TEST_CURL_LOG="$CURL_LOG"
+
+cat > "$GH_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+dest=""
+gh_url=""
+prev=""
+for arg in "$@"; do
+  case "$prev" in -o) dest="$arg" ;; esac
+  case "$arg" in https://github.com/*) gh_url="$arg" ;; esac
+  prev="$arg"
+done
+if [ -n "$gh_url" ]; then
+  printf '%s\n' "$gh_url" >> "$ORVEX_TEST_CURL_LOG"
+  [ -z "$dest" ] || : > "$dest"
+  printf '404'
+  exit 0
+fi
+exec "$ORVEX_TEST_REAL_CURL" "$@"
+EOF
+
+cat > "$GH_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ORVEX_TEST_GH_LOG"
+out=""
+pattern=""
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    --output|-O) out="$arg" ;;
+    --pattern|-p) pattern="$arg" ;;
+  esac
+  prev="$arg"
+done
+[ -z "${ORVEX_TEST_GH_FAIL:-}" ] || exit 1
+[ -n "$out" ] && [ -n "$pattern" ] || exit 1
+cp "$ORVEX_TEST_RELEASE_ROOT/$pattern" "$out"
+EOF
+
+cp "$GH_BIN/curl" "$NOGH_BIN/curl"
+chmod 755 "$GH_BIN/curl" "$GH_BIN/gh" "$NOGH_BIN/curl"
+
+echo '13. private-repo 404 falls back to gh and installs'
+reset_logs
+: > "$GH_LOG"
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+export ORVEX_BMAD_RELEASE_BASE_URL='https://github.com/orvexai/orvex-installer/releases/latest/download'
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -eq 0 ] || { echo "FAIL: gh fallback did not install (rc=$LAST_RC)" >&2; cat "$TEST_ROOT/stderr" >&2; exit 1; }
+[ -s "$EXEC_LOG" ] || { echo 'FAIL: gh fallback did not execute the binary' >&2; exit 1; }
+assert_contains '--repo orvexai/orvex-installer' "$GH_LOG"
+assert_contains '--pattern orvex-installer-linux-amd64' "$GH_LOG"
+assert_contains '--pattern checksums.txt' "$GH_LOG"
+echo '   PASS (anonymous 404, then gh supplied both asset and checksums)'
+
+echo '14. private-repo 404 without gh names the two possible causes'
+reset_logs
+: > "$GH_LOG"
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+export ORVEX_BMAD_RELEASE_BASE_URL='https://github.com/orvexai/orvex-installer/releases/latest/download'
+begin_failure no-gh
+run_capture env PATH="$NOGH_BIN:$STUB_BIN:/usr/bin:/bin" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: 404 without gh succeeded' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: 404 without gh executed the binary' >&2; exit 1; }
+[ ! -s "$GH_LOG" ] || { echo 'FAIL: gh was invoked when absent from PATH' >&2; exit 1; }
+assert_contains 'private' "$TEST_ROOT/stderr"
+assert_contains 'gh auth login' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo '   PASS'
+
+echo '15. a non-github base URL must never reach gh'
+reset_logs
+: > "$GH_LOG"
+export ORVEX_BMAD_RELEASE_BASE_URL="$HTTP_BASE/releases/latest/download"
+begin_failure no-fallback-for-custom-base
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: missing asset on a custom base succeeded' >&2; exit 1; }
+[ ! -s "$GH_LOG" ] || { echo 'FAIL: custom base URL fell back to gh, masking a local failure' >&2; cat "$GH_LOG" >&2; exit 1; }
+assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo '   PASS (local failure surfaced as itself, not routed to a different source)'
+
 echo 'All numbered BMAD shim tests passed.'

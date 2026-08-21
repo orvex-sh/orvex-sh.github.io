@@ -69,17 +69,69 @@ _ASSET="orvex-installer-$_GOOS-$_GOARCH"
 _RELEASE_BASE_URL="${ORVEX_BMAD_RELEASE_BASE_URL:-https://github.com/orvexai/orvex-installer/releases/latest/download}"
 _RELEASE_BASE_URL="${_RELEASE_BASE_URL%/}"
 
+# Resolve a gh fallback target from the release base URL. Measured: an
+# anonymous request for a release asset on a private repo returns 404, which is
+# indistinguishable from a genuinely missing asset, so gh is the only way to
+# tell the two apart. Only a github.com URL of the documented shape has a
+# fallback; a custom base (the test server, a mirror) stays pure curl so a
+# local failure is never masked by reaching a different source.
+_GH_REPO=""
+_GH_TAG=""
+case "$_RELEASE_BASE_URL" in
+  https://github.com/*/releases/latest/download)
+    _GH_REST="${_RELEASE_BASE_URL#https://github.com/}"
+    _GH_REPO="${_GH_REST%/releases/latest/download}"
+    ;;
+  https://github.com/*/releases/download/*)
+    _GH_REST="${_RELEASE_BASE_URL#https://github.com/}"
+    _GH_TAG="${_GH_REST##*/}"
+    _GH_REPO="${_GH_REST%/releases/download/*}"
+    ;;
+esac
+# Require exactly owner/repo; anything else is not a target gh can use.
+case "$_GH_REPO" in
+  */*/*|*/) _GH_REPO="" ;;
+  */*) ;;
+  *) _GH_REPO="" ;;
+esac
+
+download_asset() {
+  _da_name="$1"
+  _da_dest="$2"
+  # Anonymous first: a public repo needs no auth, and `curl | bash` must not
+  # require gh. Deliberately no -f, so an HTTP error still yields its status.
+  _da_code="$(curl -sSL -o "$_da_dest" -w '%{http_code}' "${_RELEASE_BASE_URL}/${_da_name}" 2>/dev/null)" || _da_code="000"
+  case "$_da_code" in
+    2??) return 0 ;;
+  esac
+  if [ -n "$_GH_REPO" ] && { [ "$_da_code" = "404" ] || [ "$_da_code" = "403" ]; }; then
+    if command -v gh >/dev/null 2>&1; then
+      if [ -n "$_GH_TAG" ]; then
+        gh release download "$_GH_TAG" --repo "$_GH_REPO" --pattern "$_da_name" --output "$_da_dest" --clobber >/dev/null 2>&1 && return 0
+      else
+        gh release download --repo "$_GH_REPO" --pattern "$_da_name" --output "$_da_dest" --clobber >/dev/null 2>&1 && return 0
+      fi
+      echo "ERROR: could not download $_da_name from $_GH_REPO" >&2
+      echo "       HTTP $_da_code anonymously, and 'gh release download' also failed." >&2
+      echo "       If the repository is private, authenticate: gh auth login" >&2
+      echo "       If it is public, no release asset named $_da_name has been published." >&2
+      return 1
+    fi
+    echo "ERROR: HTTP $_da_code for ${_RELEASE_BASE_URL}/${_da_name}" >&2
+    echo "       Either $_GH_REPO is private — in which case this URL can never work" >&2
+    echo "       anonymously and GitHub CLI is required — or the asset is unpublished." >&2
+    echo "       Install https://cli.github.com then run: gh auth login" >&2
+    return 1
+  fi
+  echo "ERROR: download failed: ${_RELEASE_BASE_URL}/${_da_name} (HTTP $_da_code)" >&2
+  return 1
+}
+
 _ASSET_TMP="$(mktemp -t orvex-bmad-asset.XXXXXX 2>/dev/null || mktemp)"
 _CHECKSUM_TMP="$(mktemp -t orvex-bmad-checksums.XXXXXX 2>/dev/null || mktemp)"
 
-curl -fsSL "${_RELEASE_BASE_URL}/${_ASSET}" -o "$_ASSET_TMP" || {
-  echo "ERROR: download failed: ${_RELEASE_BASE_URL}/${_ASSET}" >&2
-  exit 1
-}
-curl -fsSL "${_RELEASE_BASE_URL}/checksums.txt" -o "$_CHECKSUM_TMP" || {
-  echo "ERROR: download failed: ${_RELEASE_BASE_URL}/checksums.txt" >&2
-  exit 1
-}
+download_asset "$_ASSET" "$_ASSET_TMP" || exit 1
+download_asset "checksums.txt" "$_CHECKSUM_TMP" || exit 1
 
 EXPECTED="$(awk -v asset="$_ASSET" '$2 == asset || $2 == "*" asset { print tolower($1); exit }' "$_CHECKSUM_TMP")"
 case "$EXPECTED" in
