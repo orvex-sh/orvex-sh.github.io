@@ -14,6 +14,9 @@ REQUEST_LOG="$TEST_ROOT/http-requests.log"
 HTTP_PID=""
 mkdir -p "$TMP_ROOT" "$HTTP_ROOT/releases/latest/download"
 export TMPDIR="$TMP_ROOT"
+HOME="$TEST_ROOT/home"
+mkdir -p "$HOME"
+export HOME
 
 cleanup_test() {
   if [ -n "$HTTP_PID" ]; then
@@ -453,6 +456,13 @@ EOF
 cat > "$GH_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$ORVEX_TEST_GH_LOG"
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  if [ -n "${ORVEX_TEST_GH_UNAUTH:-}" ]; then
+    printf 'not logged into any GitHub hosts; run gh auth login\n' >&2
+    exit 1
+  fi
+  exit 0
+fi
 out=""
 pattern=""
 prev=""
@@ -489,21 +499,35 @@ if PATH="$NOGH_BIN" command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
-echo '13. private-repo 404 falls back to gh and installs'
+echo '13. anonymous 200 never invokes gh'
+reset_logs
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+export ORVEX_BMAD_RELEASE_BASE_URL="$HTTP_BASE/releases/latest/download"
+export ORVEX_BMAD_GH_REPO="$FIXTURE_REPO"
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -eq 0 ] || { echo "FAIL: anonymous 200 did not install (rc=$LAST_RC)" >&2; exit 1; }
+[ ! -s "$GH_LOG" ] || { echo 'FAIL: gh was invoked after an anonymous 200' >&2; cat "$GH_LOG" >&2; exit 1; }
+[ -s "$EXEC_LOG" ] || { echo 'FAIL: anonymous 200 did not execute the binary' >&2; exit 1; }
+echo "   PASS (exit $LAST_RC; gh call log stayed empty)"
+
+echo '14. private-repo 404 falls back to gh and installs'
 reset_logs
 : > "$GH_LOG"
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
 export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
+export ORVEX_BMAD_GH_REPO="$FIXTURE_REPO"
 run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
 [ "$LAST_RC" -eq 0 ] || { echo "FAIL: gh fallback did not install (rc=$LAST_RC)" >&2; cat "$TEST_ROOT/stderr" >&2; exit 1; }
 [ -s "$EXEC_LOG" ] || { echo 'FAIL: gh fallback did not execute the binary' >&2; exit 1; }
+assert_contains 'auth status' "$GH_LOG"
 assert_contains "--repo $FIXTURE_REPO" "$GH_LOG"
 assert_contains '--pattern orvex-installer-linux-amd64' "$GH_LOG"
 assert_contains '--pattern checksums.txt' "$GH_LOG"
-echo '   PASS (anonymous 404, then gh supplied both asset and checksums)'
+echo "   PASS (exit $LAST_RC; anonymous 404, then gh supplied both asset and checksums)"
 
-echo '14. 404 with no gh available says GitHub CLI is required'
+echo '15. 404 with no gh available says GitHub CLI is required'
 reset_logs
 : > "$GH_LOG"
 make_binary orvex-installer-linux-amd64
@@ -529,33 +553,70 @@ run_capture env -i \
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: 404 without gh succeeded' >&2; exit 1; }
 [ ! -s "$EXEC_LOG" ] || { echo 'FAIL: 404 without gh executed the binary' >&2; exit 1; }
 [ ! -s "$GH_LOG" ] || { echo 'FAIL: the gh stub ran while gh was meant to be absent' >&2; exit 1; }
-# Distinctive to this branch. Both branches mention "private" and "gh auth
-# login", so asserting those would pass whichever branch ran.
+# Distinctive to this branch: the authenticated-gh branch says the asset is
+# missing, while this branch says the CLI itself is required.
 assert_contains 'GitHub CLI is required' "$TEST_ROOT/stderr"
-assert_not_contains "also failed" "$TEST_ROOT/stderr"
+assert_contains 'Install GitHub CLI' "$TEST_ROOT/stderr"
+assert_not_contains 'gh is not authenticated' "$TEST_ROOT/stderr"
+assert_not_contains 'The asset does not exist' "$TEST_ROOT/stderr"
 assert_failure_cleanup
-echo '   PASS'
+echo "   PASS (exit $LAST_RC; private-repo/gh-absent diagnostic was selected)"
 
-echo '15. gh present but failing reports that gh itself failed'
+echo '16. gh present but unauthenticated says gh auth login is needed'
 reset_logs
 : > "$GH_LOG"
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
 export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
+export ORVEX_BMAD_GH_REPO="$FIXTURE_REPO"
 begin_failure gh-fails
-run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_FAIL=1 bash "$SHIM" --non-interactive
-[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: failing gh still succeeded' >&2; exit 1; }
+run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_UNAUTH=1 bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: unauthenticated gh still succeeded' >&2; exit 1; }
 [ ! -s "$EXEC_LOG" ] || { echo 'FAIL: failing gh executed the binary' >&2; exit 1; }
 [ -s "$GH_LOG" ] || { echo 'FAIL: gh was never attempted' >&2; exit 1; }
-assert_contains "also failed" "$TEST_ROOT/stderr"
-assert_not_contains 'GitHub CLI is required' "$TEST_ROOT/stderr"
+assert_contains 'gh is not authenticated' "$TEST_ROOT/stderr"
+assert_contains 'gh auth login' "$TEST_ROOT/stderr"
+assert_not_contains 'The asset does not exist' "$TEST_ROOT/stderr"
 assert_failure_cleanup
-echo '   PASS (distinct from the no-gh branch)'
+echo "   PASS (exit $LAST_RC; unauthenticated-gh diagnostic was selected)"
 
-echo '16. a non-github base URL must never reach gh'
+echo '17. authenticated gh reports a genuinely missing asset'
+reset_logs
+: > "$GH_LOG"
+export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
+export ORVEX_BMAD_GH_REPO="$FIXTURE_REPO"
+begin_failure gh-missing-asset
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: missing gh asset succeeded' >&2; exit 1; }
+[ -s "$GH_LOG" ] || { echo 'FAIL: authenticated gh was never attempted' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: missing gh asset executed the binary' >&2; exit 1; }
+assert_contains "release asset 'orvex-installer-linux-amd64' is missing" "$TEST_ROOT/stderr"
+assert_contains 'The asset does not exist: orvex-installer-linux-amd64' "$TEST_ROOT/stderr"
+assert_not_contains 'gh is not authenticated' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo "   PASS (exit $LAST_RC; missing asset was named explicitly)"
+
+echo '18. checksum mismatch after gh download is not executable or executed'
+reset_logs
+make_binary orvex-installer-linux-amd64
+printf '%064d  orvex-installer-linux-amd64\n' 0 > "$RELEASE_ROOT/checksums.txt"
+export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
+export ORVEX_BMAD_GH_REPO="$FIXTURE_REPO"
+begin_failure gh-checksum-mismatch
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: gh checksum mismatch succeeded' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: gh checksum mismatch executed the binary' >&2; exit 1; }
+mode="$(cut -d' ' -f1 "$HASH_LOG")"
+[ "$mode" != 755 ] || { echo 'FAIL: gh checksum mismatch made asset executable' >&2; exit 1; }
+assert_contains 'ERROR: SHA-256 mismatch for orvex-installer-linux-amd64' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo "   PASS (exit $LAST_RC; hash observed mode $mode and exec log stayed empty)"
+
+echo '19. a non-github base URL must never reach gh without an override'
 reset_logs
 : > "$GH_LOG"
 export ORVEX_BMAD_RELEASE_BASE_URL="$HTTP_BASE/releases/latest/download"
+unset ORVEX_BMAD_GH_REPO
 begin_failure no-fallback-for-custom-base
 run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: missing asset on a custom base succeeded' >&2; exit 1; }
@@ -564,17 +625,67 @@ assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
 assert_failure_cleanup
 echo '   PASS (local failure surfaced as itself, not routed to a different source)'
 
-echo '17. the default release URL targets the real installer repo'
+echo '20. the default release URL targets the real installer repo'
 reset_logs
 : > "$GH_LOG"
 unset ORVEX_BMAD_RELEASE_BASE_URL
+unset ORVEX_BMAD_GH_REPO
 begin_failure default-base-url
-run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_FAIL=1 bash "$SHIM" --non-interactive
+run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_UNAUTH=1 bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: default base URL unexpectedly installed' >&2; exit 1; }
 assert_contains 'https://github.com/orvexai/orvex-installer/releases/latest/download/orvex-installer-linux-amd64' "$CURL_LOG"
-assert_contains '--repo orvexai/orvex-installer' "$GH_LOG"
+assert_contains 'auth status' "$GH_LOG"
+assert_contains 'ERROR: orvexai/orvex-installer is unreachable anonymously (HTTP 404), and gh is not authenticated.' "$TEST_ROOT/stderr"
+assert_contains 'gh auth login' "$TEST_ROOT/stderr"
 assert_failure_cleanup
-echo '   PASS (default resolves to orvexai/orvex-installer, stubbed throughout)'
+echo "   PASS (exit $LAST_RC; default repo named in auth diagnostic)"
+
+# A18 mutation: change the resolved default slug and require this branch's
+# exact diagnostic to name the mutation, rather than passing generically.
+MUTATED_DEFAULT_REPO='orvexai/mutated-installer'
+reset_logs
+: > "$GH_LOG"
+unset ORVEX_BMAD_RELEASE_BASE_URL
+export ORVEX_BMAD_GH_REPO="$MUTATED_DEFAULT_REPO"
+begin_failure default-base-url-mutated-unauth
+run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_UNAUTH=1 bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: mutated unauthenticated default repo succeeded' >&2; exit 1; }
+MUTATED_UNAUTH_ERROR="ERROR: $MUTATED_DEFAULT_REPO is unreachable anonymously (HTTP 404), and gh is not authenticated."
+assert_contains "$MUTATED_UNAUTH_ERROR" "$TEST_ROOT/stderr"
+assert_not_contains 'ERROR: orvexai/orvex-installer is unreachable anonymously' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo "   PASS (mutation $MUTATED_DEFAULT_REPO; exact failure: $MUTATED_UNAUTH_ERROR)"
+
+echo '21. authenticated default repo is passed to gh release download'
+reset_logs
+: > "$GH_LOG"
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+unset ORVEX_BMAD_RELEASE_BASE_URL
+unset ORVEX_BMAD_GH_REPO
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -eq 0 ] || { echo "FAIL: authenticated default fallback did not install (rc=$LAST_RC)" >&2; cat "$TEST_ROOT/stderr" >&2; exit 1; }
+[ -s "$EXEC_LOG" ] || { echo 'FAIL: authenticated default fallback did not execute the binary' >&2; exit 1; }
+assert_contains 'https://github.com/orvexai/orvex-installer/releases/latest/download/orvex-installer-linux-amd64' "$CURL_LOG"
+assert_contains '--repo orvexai/orvex-installer' "$GH_LOG"
+assert_contains '--pattern orvex-installer-linux-amd64' "$GH_LOG"
+assert_contains '--pattern checksums.txt' "$GH_LOG"
+echo "   PASS (exit $LAST_RC; gh release download received --repo orvexai/orvex-installer)"
+
+# A18 mutation: with auth available, the missing-asset diagnostic must name
+# the mutated slug too; otherwise a generic missing-asset assertion could pass.
+reset_logs
+: > "$GH_LOG"
+unset ORVEX_BMAD_RELEASE_BASE_URL
+export ORVEX_BMAD_GH_REPO="$MUTATED_DEFAULT_REPO"
+begin_failure default-base-url-mutated-missing
+run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: mutated authenticated default repo succeeded' >&2; exit 1; }
+MUTATED_MISSING_ERROR="ERROR: $MUTATED_DEFAULT_REPO is reachable with gh, but release asset 'orvex-installer-linux-amd64' is missing for this platform/release."
+assert_contains "$MUTATED_MISSING_ERROR" "$TEST_ROOT/stderr"
+assert_not_contains 'gh is not authenticated' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo "   PASS (mutation $MUTATED_DEFAULT_REPO; exact failure: $MUTATED_MISSING_ERROR)"
 
 
 echo 'All numbered BMAD shim tests passed.'

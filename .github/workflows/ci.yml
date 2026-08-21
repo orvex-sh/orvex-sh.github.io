@@ -2,23 +2,33 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
   shim:
     runs-on: ubuntu-latest
+    env:
+      # Per A15 the suite needs a writable HOME as well as loopback binding and
+      # a pty. It serves a fake releases/latest/download over 127.0.0.1 and
+      # asserts on observed behaviour, so it cannot run in a sandbox lacking
+      # any of the three.
+      HOME: ${{ runner.temp }}/orvex-bmad-home
     steps:
       - name: Check out the source
         uses: actions/checkout@v4
 
+      - name: Prepare a writable HOME
+        run: mkdir -p "$HOME"
+
       - name: Parse the shim
         run: bash -n install/bmad
 
+      - name: shellcheck
+        run: shellcheck install/bmad
+
       # The shim must run under the stock bash macOS ships, which is 3.2.57.
-      # The suite greps for bash-4-only constructs, but that only guards the
-      # syntax it knows about; parsing under a POSIX-mode shell is a cheap
-      # second angle on the same risk.
+      # This guard is duplicated inside the suite; keeping it here too means a
+      # bash-4 construct fails fast and by name.
       - name: Reject bash-4-only constructs
         run: |
           set -euo pipefail
@@ -27,9 +37,6 @@ jobs:
             exit 1
           fi
 
-      # Per A15 this suite needs loopback binding, a writable HOME and a pty.
-      # It serves a fake releases/latest/download over 127.0.0.1 and asserts on
-      # observed behaviour, so it cannot run in a sandbox without those.
       - name: Shim suite
         run: bash install/test-bmad.sh
 
