@@ -6,7 +6,10 @@ on:
 
 jobs:
   shim:
-    runs-on: ubuntu-latest
+    # Self-hosted ARC scale set; `runners` is the label every private orvexai
+    # repo uses and is verified working. GitHub-hosted runners are metered on a
+    # private org repo, so `ubuntu-latest` queued forever and never started.
+    runs-on: runners
     env:
       # Per A15 the suite needs a writable HOME as well as loopback binding and
       # a pty. It serves a fake releases/latest/download over 127.0.0.1 and
