@@ -413,12 +413,18 @@ fi
 assert_failure_cleanup
 echo '   PASS'
 
-# A19 stubs. The curl wrapper answers any github.com URL with 404 without
-# touching the network; every other URL is delegated to the real curl, so the
-# local-server tests are unaffected by being run through it.
+# --- A19: downloading when the installer repo is private -------------------
+#
+# These tests never contact a real repository. The curl wrapper answers any
+# github.com URL with 404 without touching the network, and delegates every
+# other URL to the real curl so the local-server tests are unaffected. The
+# fixture repo below deliberately does not exist, so even a scoping regression
+# cannot reach a real one.
 GH_LOG="$TEST_ROOT/gh.log"
 GH_BIN="$TEST_ROOT/gh-bin"
 NOGH_BIN="$TEST_ROOT/nogh-bin"
+FIXTURE_REPO='orvex-shim-test/fixture'
+FIXTURE_BASE="https://github.com/$FIXTURE_REPO/releases/latest/download"
 mkdir -p "$GH_BIN" "$NOGH_BIN"
 export ORVEX_TEST_REAL_CURL="$(command -v curl)"
 export ORVEX_TEST_GH_LOG="$GH_LOG"
@@ -462,40 +468,91 @@ done
 cp "$ORVEX_TEST_RELEASE_ROOT/$pattern" "$out"
 EOF
 
+# A PATH that genuinely lacks gh. It cannot simply exclude the stub directory:
+# gh ships in /usr/bin on developer machines and on GitHub's runners alike, so
+# an "absent gh" test that keeps /usr/bin on PATH silently exercises the
+# gh-present branch instead — which is how this test first passed for the wrong
+# reason. Symlink only what the shim needs, then prove gh is unreachable.
 cp "$GH_BIN/curl" "$NOGH_BIN/curl"
-chmod 755 "$GH_BIN/curl" "$GH_BIN/gh" "$NOGH_BIN/curl"
+cp "$STUB_BIN/uname" "$NOGH_BIN/uname"
+cp "$STUB_BIN/sha256sum" "$NOGH_BIN/sha256sum"
+cp "$STUB_BIN/shasum" "$NOGH_BIN/shasum"
+for _tool in bash mktemp awk chmod rm tr stat; do
+  _tool_path="$(command -v "$_tool" 2>/dev/null || true)"
+  [ -n "$_tool_path" ] || { echo "FAIL: test setup needs $_tool" >&2; exit 1; }
+  ln -sf "$_tool_path" "$NOGH_BIN/$_tool"
+done
+chmod 755 "$GH_BIN/curl" "$GH_BIN/gh" "$NOGH_BIN/curl" "$NOGH_BIN/uname" "$NOGH_BIN/sha256sum" "$NOGH_BIN/shasum"
+# Assert the precondition rather than assuming it.
+if PATH="$NOGH_BIN" command -v gh >/dev/null 2>&1; then
+  echo 'FAIL: the no-gh PATH still resolves gh; test 14 would measure the wrong branch' >&2
+  exit 1
+fi
 
 echo '13. private-repo 404 falls back to gh and installs'
 reset_logs
 : > "$GH_LOG"
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
-export ORVEX_BMAD_RELEASE_BASE_URL='https://github.com/orvexai/orvex-installer/releases/latest/download'
+export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
 run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
 [ "$LAST_RC" -eq 0 ] || { echo "FAIL: gh fallback did not install (rc=$LAST_RC)" >&2; cat "$TEST_ROOT/stderr" >&2; exit 1; }
 [ -s "$EXEC_LOG" ] || { echo 'FAIL: gh fallback did not execute the binary' >&2; exit 1; }
-assert_contains '--repo orvexai/orvex-installer' "$GH_LOG"
+assert_contains "--repo $FIXTURE_REPO" "$GH_LOG"
 assert_contains '--pattern orvex-installer-linux-amd64' "$GH_LOG"
 assert_contains '--pattern checksums.txt' "$GH_LOG"
 echo '   PASS (anonymous 404, then gh supplied both asset and checksums)'
 
-echo '14. private-repo 404 without gh names the two possible causes'
+echo '14. 404 with no gh available says GitHub CLI is required'
 reset_logs
 : > "$GH_LOG"
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
-export ORVEX_BMAD_RELEASE_BASE_URL='https://github.com/orvexai/orvex-installer/releases/latest/download'
+export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
 begin_failure no-gh
-run_capture env PATH="$NOGH_BIN:$STUB_BIN:/usr/bin:/bin" bash "$SHIM" --non-interactive
+run_capture env -i \
+  PATH="$NOGH_BIN" \
+  HOME="$HOME" \
+  TMPDIR="$TMPDIR" \
+  ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE" \
+  ORVEX_TEST_UNAME_S="$ORVEX_TEST_UNAME_S" \
+  ORVEX_TEST_UNAME_M="$ORVEX_TEST_UNAME_M" \
+  ORVEX_TEST_HASH_LOG="$HASH_LOG" \
+  ORVEX_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+  ORVEX_TEST_REAL_SHASUM="$REAL_SHASUM" \
+  ORVEX_TEST_REAL_CURL="$ORVEX_TEST_REAL_CURL" \
+  ORVEX_TEST_CURL_LOG="$CURL_LOG" \
+  ORVEX_TEST_GH_LOG="$GH_LOG" \
+  ORVEX_TEST_EXEC_LOG="$EXEC_LOG" \
+  ORVEX_TEST_RECORD="$RECORD_FILE" \
+  bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: 404 without gh succeeded' >&2; exit 1; }
 [ ! -s "$EXEC_LOG" ] || { echo 'FAIL: 404 without gh executed the binary' >&2; exit 1; }
-[ ! -s "$GH_LOG" ] || { echo 'FAIL: gh was invoked when absent from PATH' >&2; exit 1; }
-assert_contains 'private' "$TEST_ROOT/stderr"
-assert_contains 'gh auth login' "$TEST_ROOT/stderr"
+[ ! -s "$GH_LOG" ] || { echo 'FAIL: the gh stub ran while gh was meant to be absent' >&2; exit 1; }
+# Distinctive to this branch. Both branches mention "private" and "gh auth
+# login", so asserting those would pass whichever branch ran.
+assert_contains 'GitHub CLI is required' "$TEST_ROOT/stderr"
+assert_not_contains "also failed" "$TEST_ROOT/stderr"
 assert_failure_cleanup
 echo '   PASS'
 
-echo '15. a non-github base URL must never reach gh'
+echo '15. gh present but failing reports that gh itself failed'
+reset_logs
+: > "$GH_LOG"
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+export ORVEX_BMAD_RELEASE_BASE_URL="$FIXTURE_BASE"
+begin_failure gh-fails
+run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_FAIL=1 bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: failing gh still succeeded' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: failing gh executed the binary' >&2; exit 1; }
+[ -s "$GH_LOG" ] || { echo 'FAIL: gh was never attempted' >&2; exit 1; }
+assert_contains "also failed" "$TEST_ROOT/stderr"
+assert_not_contains 'GitHub CLI is required' "$TEST_ROOT/stderr"
+assert_failure_cleanup
+echo '   PASS (distinct from the no-gh branch)'
+
+echo '16. a non-github base URL must never reach gh'
 reset_logs
 : > "$GH_LOG"
 export ORVEX_BMAD_RELEASE_BASE_URL="$HTTP_BASE/releases/latest/download"
@@ -506,5 +563,18 @@ run_capture env PATH="$GH_BIN:$PATH" bash "$SHIM" --non-interactive
 assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
 assert_failure_cleanup
 echo '   PASS (local failure surfaced as itself, not routed to a different source)'
+
+echo '17. the default release URL targets the real installer repo'
+reset_logs
+: > "$GH_LOG"
+unset ORVEX_BMAD_RELEASE_BASE_URL
+begin_failure default-base-url
+run_capture env PATH="$GH_BIN:$PATH" ORVEX_TEST_GH_FAIL=1 bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: default base URL unexpectedly installed' >&2; exit 1; }
+assert_contains 'https://github.com/orvexai/orvex-installer/releases/latest/download/orvex-installer-linux-amd64' "$CURL_LOG"
+assert_contains '--repo orvexai/orvex-installer' "$GH_LOG"
+assert_failure_cleanup
+echo '   PASS (default resolves to orvexai/orvex-installer, stubbed throughout)'
+
 
 echo 'All numbered BMAD shim tests passed.'
