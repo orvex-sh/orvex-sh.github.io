@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+
+      - name: Parse the shim
+        run: bash -n install/bmad
+
+      # The shim must run under the stock bash macOS ships, which is 3.2.57.
+      # The suite greps for bash-4-only constructs, but that only guards the
+      # syntax it knows about; parsing under a POSIX-mode shell is a cheap
+      # second angle on the same risk.
+      - name: Reject bash-4-only constructs
+        run: |
+          set -euo pipefail
+          if grep -nE '\$\{[^}]+,,\}|\$\{[^}]+\^\^\}|declare[[:space:]]+-A|(^|[[:space:]])mapfile([[:space:]]|$)|readarray' install/bmad; then
+            echo "::error::install/bmad uses bash 4 constructs; macOS ships bash 3.2"
+            exit 1
+          fi
+
+      # Per A15 this suite needs loopback binding, a writable HOME and a pty.
+      # It serves a fake releases/latest/download over 127.0.0.1 and asserts on
+      # observed behaviour, so it cannot run in a sandbox without those.
+      - name: Shim suite
+        run: bash install/test-bmad.sh
+
+      - name: Suite must not modify tracked files
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code; then
+            echo "::error::the shim suite modified tracked files"
+            exit 1
+          fi
