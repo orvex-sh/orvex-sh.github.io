@@ -6,7 +6,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 SHIM="$SCRIPT_DIR/bmad"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/orvex-bmad-test.XXXXXX")"
-trap 'rm -rf -- "$TEST_ROOT"' EXIT
+TMP_ROOT="$TEST_ROOT/tmp"
+HTTP_ROOT="$TEST_ROOT/http-root"
+PORT_FILE="$TEST_ROOT/http-port"
+HTTP_STATUS_FILE="$TEST_ROOT/http-500"
+REQUEST_LOG="$TEST_ROOT/http-requests.log"
+HTTP_PID=""
+mkdir -p "$TMP_ROOT" "$HTTP_ROOT/releases/latest/download"
+export TMPDIR="$TMP_ROOT"
+
+cleanup_test() {
+  if [ -n "$HTTP_PID" ]; then
+    kill "$HTTP_PID" 2>/dev/null || true
+    wait "$HTTP_PID" 2>/dev/null || true
+  fi
+  rm -rf -- "$TEST_ROOT"
+}
+trap cleanup_test EXIT
 
 if grep -nE '\$\{[^}]+,,\}|\$\{[^}]+\^\^\}|declare[[:space:]]+-A|(^|[[:space:]])mapfile([[:space:]]|$)|readarray' "$SHIM"; then
   echo 'FAIL: shim contains bash-4-only constructs; bash 3.2 compatibility is required' >&2
@@ -14,20 +30,22 @@ if grep -nE '\$\{[^}]+,,\}|\$\{[^}]+\^\^\}|declare[[:space:]]+-A|(^|[[:space:]])
 fi
 
 STUB_BIN="$TEST_ROOT/bin"
-RELEASE_ROOT="$TEST_ROOT/releases/latest/download"
-mkdir -p "$STUB_BIN" "$RELEASE_ROOT"
+RELEASE_ROOT="$HTTP_ROOT/releases/latest/download"
+mkdir -p "$STUB_BIN"
 
 REAL_SHA256SUM="$(command -v sha256sum 2>/dev/null || true)"
 REAL_SHASUM="$(command -v shasum 2>/dev/null || true)"
 [ -n "$REAL_SHA256SUM" ] || [ -n "$REAL_SHASUM" ] || { echo "test requires sha256sum or shasum" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo 'test requires curl' >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo 'test requires python3' >&2; exit 1; }
 
 UNAME_S="Linux"
 UNAME_M="x86_64"
-CURL_LOG="$TEST_ROOT/curl.log"
+CURL_LOG="$REQUEST_LOG"
 HASH_LOG="$TEST_ROOT/hash.log"
 EXEC_LOG="$TEST_ROOT/exec.log"
 RECORD_FILE="$TEST_ROOT/record.log"
-SCRIPT_URL="$TEST_ROOT/bmad-copy"
+SCRIPT_PATH="/bmad-copy"
 
 cat > "$STUB_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -36,30 +54,6 @@ case "${1:-}" in
   -m) printf '%s\n' "$ORVEX_TEST_UNAME_M" ;;
   *) exit 1 ;;
 esac
-EOF
-
-cat > "$STUB_BIN/curl" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-url=""
-out=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) out="$2"; shift 2 ;;
-    -*) shift ;;
-    *) url="$1"; shift ;;
-  esac
-done
-printf '%s\n' "$url" >> "$ORVEX_TEST_CURL_LOG"
-[ -n "$out" ] || { echo "curl stub: missing -o" >&2; exit 2; }
-if [ "$url" = "$ORVEX_TEST_SCRIPT_URL" ]; then
-  cp "$ORVEX_TEST_SHIM" "$out"
-elif [ -f "$url" ]; then
-  cp "$url" "$out"
-else
-  echo "curl stub: missing fixture $url" >&2
-  exit 22
-fi
 EOF
 
 cat > "$STUB_BIN/sha256sum" <<'EOF'
@@ -78,18 +72,57 @@ set -euo pipefail
 exec "$ORVEX_TEST_REAL_SHASUM" -a 256 "$1"
 EOF
 
-chmod 755 "$STUB_BIN/uname" "$STUB_BIN/curl" "$STUB_BIN/sha256sum" "$STUB_BIN/shasum"
-cp "$SHIM" "$SCRIPT_URL"
+chmod 755 "$STUB_BIN/uname" "$STUB_BIN/sha256sum" "$STUB_BIN/shasum"
+
+cat > "$TEST_ROOT/http-server.py" <<'PY'
+import http.server
+import os
+import sys
+
+root, port_file, status_file, request_log = sys.argv[1:]
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=root, **kwargs)
+
+    def do_GET(self):
+        with open(request_log, "a", encoding="utf-8") as log:
+            log.write(self.path + "\n")
+        if os.path.exists(status_file) and self.path == "/releases/latest/download/orvex-installer-linux-amd64":
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"intentional test 500\n")
+            return
+        super().do_GET()
+
+    def log_message(self, _format, *_args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as port:
+    port.write(str(server.server_port))
+server.serve_forever()
+PY
+
+python3 -u "$TEST_ROOT/http-server.py" "$HTTP_ROOT" "$PORT_FILE" "$HTTP_STATUS_FILE" "$REQUEST_LOG" &
+HTTP_PID=$!
+for _attempt in $(seq 1 100); do
+  [ -s "$PORT_FILE" ] && break
+  kill -0 "$HTTP_PID" 2>/dev/null || { echo 'FAIL: HTTP server exited before readiness' >&2; exit 1; }
+  sleep 0.01
+done
+[ -s "$PORT_FILE" ] || { echo 'FAIL: HTTP server did not become ready' >&2; exit 1; }
+HTTP_BASE="http://127.0.0.1:$(cat "$PORT_FILE")"
+SCRIPT_URL="$HTTP_BASE$SCRIPT_PATH"
+cp "$SHIM" "$HTTP_ROOT/bmad-copy"
+
 
 export PATH="$STUB_BIN:$PATH"
 export ORVEX_TEST_UNAME_S="$UNAME_S"
 export ORVEX_TEST_UNAME_M="$UNAME_M"
-export ORVEX_TEST_CURL_LOG="$CURL_LOG"
 export ORVEX_TEST_HASH_LOG="$HASH_LOG"
 export ORVEX_TEST_REAL_SHA256SUM="$REAL_SHA256SUM"
 export ORVEX_TEST_REAL_SHASUM="$REAL_SHASUM"
-export ORVEX_TEST_SCRIPT_URL="$SCRIPT_URL"
-export ORVEX_TEST_SHIM="$SHIM"
 export ORVEX_TEST_RECORD="$RECORD_FILE"
 export ORVEX_TEST_EXEC_LOG="$EXEC_LOG"
 
@@ -131,6 +164,8 @@ reset_logs() {
   : > "$HASH_LOG"
   : > "$EXEC_LOG"
   : > "$RECORD_FILE"
+  : > "$REQUEST_LOG"
+  rm -f "$HTTP_STATUS_FILE"
   rm -f "$RELEASE_ROOT"/*
 }
 
@@ -159,6 +194,36 @@ run_capture() {
   fi
 }
 
+snapshot_temps() {
+  find "$TMP_ROOT" -maxdepth 1 -type f -name 'orvex-bmad*' -print > "$1"
+}
+
+begin_failure() {
+  failure_label="$1"
+  TEMP_BEFORE="$TEST_ROOT/${failure_label}.before"
+  TEMP_AFTER="$TEST_ROOT/${failure_label}.after"
+  snapshot_temps "$TEMP_BEFORE"
+}
+
+assert_failure_cleanup() {
+  snapshot_temps "$TEMP_AFTER"
+  cmp -s "$TEMP_BEFORE" "$TEMP_AFTER" || { echo "FAIL: $failure_label changed the temp snapshot" >&2; exit 1; }
+}
+
+assert_success_asset_only() {
+  success_dir="$1"
+  success_snapshot="$TEST_ROOT/success.snapshot"
+  find "$success_dir" -maxdepth 1 -type f -name 'orvex-bmad*' -print > "$success_snapshot"
+  success_count="$(wc -l < "$success_snapshot")"
+  [ "$success_count" -eq 1 ] || { echo "FAIL: successful run left $success_count BMAD temp files; expected one asset" >&2; exit 1; }
+  success_file=""
+  IFS= read -r success_file < "$success_snapshot"
+  case "$success_file" in
+    *orvex-bmad-asset.*) ;;
+    *) echo "FAIL: successful run left unexpected temp file: $success_file" >&2; exit 1 ;;
+  esac
+}
+
 run_matrix_case() {
   platform="$1"
   machine="$2"
@@ -167,11 +232,11 @@ run_matrix_case() {
   make_binary "$expected"
   make_checksums "$expected"
   export ORVEX_TEST_UNAME_S="$platform" ORVEX_TEST_UNAME_M="$machine"
-  export ORVEX_BMAD_RELEASE_BASE_URL="$RELEASE_ROOT"
+  export ORVEX_BMAD_RELEASE_BASE_URL="$HTTP_BASE/releases/latest/download"
   unset ORVEX_BMAD_BOOTSTRAPPED_VERSION ORVEX_BMAD_PROJECT ORVEX_BMAD_CUSTOM ORVEX_BMAD_EMPTY ORVEX_BMAD_COMMAND
   run_capture bash "$SHIM" --non-interactive
   [ "$LAST_RC" -eq 0 ] || { echo "FAIL: matrix case $platform/$machine exited $LAST_RC" >&2; exit 1; }
-  assert_contains "$RELEASE_ROOT/$expected" "$CURL_LOG"
+  assert_contains "/releases/latest/download/$expected" "$CURL_LOG"
   assert_contains 'ORVEX_BMAD_BOOTSTRAPPED_VERSION=latest' "$RECORD_FILE"
 }
 
@@ -189,48 +254,60 @@ echo '   PASS'
 echo '2. unsupported platform/architecture'
 reset_logs
 export ORVEX_TEST_UNAME_S=Windows ORVEX_TEST_UNAME_M=x86_64
+begin_failure unsupported-platform
 run_capture bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: unsupported platform succeeded' >&2; exit 1; }
 assert_contains "ERROR: unsupported platform 'Windows'" "$TEST_ROOT/stderr"
+assert_failure_cleanup
 export ORVEX_TEST_UNAME_S=Linux ORVEX_TEST_UNAME_M=386
+begin_failure unsupported-architecture
 run_capture bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: unsupported architecture succeeded' >&2; exit 1; }
 assert_contains "ERROR: unsupported architecture '386'" "$TEST_ROOT/stderr"
+assert_failure_cleanup
 echo '   PASS'
 
-echo '3. missing asset'
+echo '3. missing asset (HTTP 404)'
 reset_logs
 export ORVEX_TEST_UNAME_S=Linux ORVEX_TEST_UNAME_M=x86_64
+begin_failure missing-asset
 run_capture bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: missing asset succeeded' >&2; exit 1; }
 [ ! -s "$EXEC_LOG" ] || { echo 'FAIL: missing asset executed binary' >&2; exit 1; }
 assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
+assert_contains '/releases/latest/download/orvex-installer-linux-amd64' "$CURL_LOG"
+assert_failure_cleanup
 echo '   PASS'
 
 echo '4. checksum mismatch: non-executable and not executed'
 reset_logs
 make_binary orvex-installer-linux-amd64
 printf '%064d  orvex-installer-linux-amd64\n' 0 > "$RELEASE_ROOT/checksums.txt"
+begin_failure checksum-mismatch
 run_capture bash "$SHIM" --non-interactive
 [ "$LAST_RC" -ne 0 ] || { echo 'FAIL: checksum mismatch succeeded' >&2; exit 1; }
 [ ! -s "$EXEC_LOG" ] || { echo 'FAIL: checksum mismatch executed binary' >&2; exit 1; }
 mode="$(cut -d' ' -f1 "$HASH_LOG")"
 [ "$mode" != 755 ] || { echo 'FAIL: checksum mismatch made asset executable' >&2; exit 1; }
+assert_failure_cleanup
 echo '   PASS (hash stub observed mode '"$mode"'; exec log empty)'
 
 echo '5. no-argument defaults to install'
 reset_logs
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
-run_capture bash "$SHIM" --non-interactive
-[ "$LAST_RC" -eq 0 ] || { echo 'FAIL: setup for default command failed' >&2; exit 1; }
-reset_logs
+SUCCESS_TMP_ROOT="$TEST_ROOT/success-tmp"
+mkdir -p "$SUCCESS_TMP_ROOT"
+OLD_TMPDIR="$TMPDIR"
+export TMPDIR="$SUCCESS_TMP_ROOT"
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
 run_capture bash "$SHIM"
 [ "$LAST_RC" -eq 0 ] || { echo 'FAIL: no-argument invocation failed' >&2; exit 1; }
 assert_contains 'ARGC=1' "$RECORD_FILE"
 assert_contains 'ARG[0]=install' "$RECORD_FILE"
+assert_success_asset_only "$SUCCESS_TMP_ROOT"
+export TMPDIR="$OLD_TMPDIR"
 echo '   PASS'
 
 echo '6. args and ORVEX_BMAD_* forwarding'
@@ -268,7 +345,7 @@ if command -v script >/dev/null 2>&1; then
     LAST_RC=$?
   fi
   [ "$LAST_RC" -eq 0 ] || { echo "FAIL: pty self-reexec exited $LAST_RC" >&2; exit 1; }
-  [ "$(grep -Fxc -- "$SCRIPT_URL" "$CURL_LOG")" -eq 1 ] || { echo 'FAIL: self-reexec did not fetch script exactly once' >&2; exit 1; }
+  [ "$(grep -Fxc -- "$SCRIPT_PATH" "$CURL_LOG")" -eq 1 ] || { echo 'FAIL: self-reexec did not fetch script exactly once' >&2; exit 1; }
   assert_contains 'ARG[0]=install' "$RECORD_FILE"
   echo '   PASS (script URL fetched once, then stdin came from /dev/tty)'
 else
@@ -280,10 +357,60 @@ echo '8. --non-interactive skips self-re-exec'
 reset_logs
 make_binary orvex-installer-linux-amd64
 make_checksums orvex-installer-linux-amd64
-export ORVEX_BMAD_SCRIPT_URL="$TEST_ROOT/should-not-be-fetched"
+export ORVEX_BMAD_SCRIPT_URL="$HTTP_BASE/should-not-be-fetched"
 run_capture bash "$SHIM" --non-interactive
 [ "$LAST_RC" -eq 0 ] || { echo 'FAIL: non-interactive invocation failed' >&2; exit 1; }
-assert_not_contains "$TEST_ROOT/should-not-be-fetched" "$CURL_LOG"
+assert_not_contains '/should-not-be-fetched' "$CURL_LOG"
+echo '   PASS'
+
+echo '9. --quiet skips self-re-exec'
+reset_logs
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+export ORVEX_BMAD_SCRIPT_URL="$HTTP_BASE/should-not-be-fetched"
+run_capture bash "$SHIM" --quiet
+[ "$LAST_RC" -eq 0 ] || { echo 'FAIL: quiet invocation failed' >&2; exit 1; }
+assert_not_contains '/should-not-be-fetched' "$CURL_LOG"
+echo '   PASS'
+
+echo '10. missing checksums.txt (HTTP 404)'
+reset_logs
+make_binary orvex-installer-linux-amd64
+begin_failure missing-checksums
+run_capture bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: missing checksums succeeded' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: missing checksums executed binary' >&2; exit 1; }
+assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
+assert_contains '/releases/latest/download/checksums.txt' "$CURL_LOG"
+assert_failure_cleanup
+echo '   PASS'
+
+echo '11. asset server error (HTTP 500)'
+reset_logs
+make_binary orvex-installer-linux-amd64
+make_checksums orvex-installer-linux-amd64
+: > "$HTTP_STATUS_FILE"
+begin_failure asset-500
+run_capture bash "$SHIM" --non-interactive
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: HTTP 500 asset succeeded' >&2; exit 1; }
+[ ! -s "$EXEC_LOG" ] || { echo 'FAIL: HTTP 500 asset executed binary' >&2; exit 1; }
+assert_contains 'ERROR: download failed:' "$TEST_ROOT/stderr"
+assert_contains '/releases/latest/download/orvex-installer-linux-amd64' "$CURL_LOG"
+assert_failure_cleanup
+echo '   PASS'
+
+echo '12. bootstrap temp cleanup on a post-reexec failure'
+reset_logs
+export ORVEX_BMAD_SCRIPT_URL="$SCRIPT_URL"
+begin_failure bootstrap-failure
+if script -qec "cat '$SHIM' | bash" "$TEST_ROOT/bootstrap-failure.transcript" >"$TEST_ROOT/bootstrap-failure.stdout" 2>"$TEST_ROOT/bootstrap-failure.stderr"; then
+  LAST_RC=0
+else
+  LAST_RC=$?
+fi
+[ "$LAST_RC" -ne 0 ] || { echo 'FAIL: post-reexec missing asset succeeded' >&2; exit 1; }
+[ "$(grep -Fxc -- "$SCRIPT_PATH" "$CURL_LOG")" -eq 1 ] || { echo 'FAIL: post-reexec failure did not fetch the script exactly once' >&2; exit 1; }
+assert_failure_cleanup
 echo '   PASS'
 
 echo 'All numbered BMAD shim tests passed.'

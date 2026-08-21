@@ -10,9 +10,10 @@ set -euo pipefail
 # A piped shell reads its script lazily from stdin. If the installer later
 # prompts, that prompt would consume the remainder of the script. Re-download
 # the script and re-exec it with the real terminal as stdin. Keep this shape in
-# sync with install/omnigent. --non-interactive must never depend on the URL.
+# sync with install/omnigent. Quiet and non-interactive runs must never depend
+# on the script URL.
 case " $* " in
-  *" --non-interactive "*) ;;
+  *" --non-interactive "*|*" --quiet "*) ;;
   *)
     if [ ! -t 0 ] && [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; then
       command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required to self-bootstrap" >&2; exit 1; }
@@ -104,5 +105,15 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
   exit 1
 fi
 
+rm -f -- "$_CHECKSUM_TMP"
+_CHECKSUM_TMP=""
+
 chmod 755 "$_ASSET_TMP" || { echo "ERROR: could not make verified installer executable" >&2; exit 1; }
+# A re-exec'd copy no longer needs its downloaded script source. Remove it
+# before replacing this shell; the asset itself must remain because it is the
+# executable being launched and cannot be cleaned up before exec.
+if [ -n "$_BOOTSTRAP_TMP" ]; then
+  rm -f -- "$_BOOTSTRAP_TMP"
+  _BOOTSTRAP_TMP=""
+fi
 exec "$_ASSET_TMP" "$@"
